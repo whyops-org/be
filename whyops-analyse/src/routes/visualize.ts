@@ -6,13 +6,14 @@ const logger = createServiceLogger('analyse:visualize');
 const app = new Hono();
 
 // Helper to escape Mermaid string
-function escapeMermaid(text: string): string {
+function escapeMermaid(text: any): string {
   if (!text) return '';
-  return text
+  const str = typeof text === 'string' ? text : JSON.stringify(text);
+  return str
     .replace(/["\n\r]/g, ' ') // Replace newlines and quotes
     .replace(/;/g, ',')       // Replace semicolons (Mermaid statement end)
     .trim()
-    .substring(0, 50) + (text.length > 50 ? '...' : ''); // Truncate
+    .substring(0, 50) + (str.length > 50 ? '...' : ''); // Truncate
 }
 
 // GET /api/visualize/:traceId/mermaid
@@ -42,10 +43,21 @@ app.get('/:traceId/mermaid', async (c) => {
         let msg = '';
         if (Array.isArray(content)) {
           // Find the last actual user message in the array
-          const lastMsg = content[content.length - 1];
-          if (lastMsg.role === 'user') {
-            msg = lastMsg.content;
-          } 
+          for (let i = content.length - 1; i >= 0; i--) {
+            const item = content[i];
+            if (item.role === 'user') {
+              if (typeof item.content === 'string') {
+                msg = item.content;
+              } else if (Array.isArray(item.content)) {
+                // Extract text from structured content
+                msg = item.content
+                  .filter((part: any) => part.type === 'input_text' || part.type === 'text')
+                  .map((part: any) => part.text)
+                  .join(' ');
+              }
+              break;
+            }
+          }
         } else if (typeof content === 'string') {
           msg = content;
         }

@@ -253,7 +253,7 @@ app.post('/chat/completions', async (c) => {
         providerId: auth.providerId,
         content: {
           content: parsedResponse.content,
-          toolCalls: parsedResponse.toolCalls,
+          toolCalls: parsedResponse.toolCalls, // Ensure tool calls are passed
           finishReason: parsedResponse.finishReason,
         },
         metadata: {
@@ -283,6 +283,340 @@ app.post('/chat/completions', async (c) => {
 });
 
 // Other OpenAI endpoints can be added here (embeddings, images, etc.)
+
+// OpenAI Responses endpoint
+app.post('/responses', async (c) => {
+  const auth = c.get('auth');
+  const requestBody = await c.req.json();
+  const isStreaming = requestBody.stream === true;
+
+  const startTime = Date.now();
+  
+  // 1. Try to find traceId from Headers
+  let traceId = c.req.header('X-Thread-ID');
+
+  // 2. If not found, try to extract hidden signature from the last assistant message in 'input'
+  // The 'input' field in /responses can be a string (prompt) or an array (conversation history)
+  if (!traceId && requestBody.input && Array.isArray(requestBody.input)) {
+    // Iterate backwards to find the last assistant message
+    for (let i = requestBody.input.length - 1; i >= 0; i--) {
+      const item = requestBody.input[i];
+      // Skip non-message items (e.g. reasoning blocks)
+      if (item.type && item.type !== 'message') continue;
+
+      // Check if it's a message from assistant
+      if (item.role === 'assistant' && item.content) {
+        // Content can be string or array of parts
+        if (typeof item.content === 'string') {
+           const extractedId = decodeSignature(item.content);
+           if (extractedId) {
+             traceId = extractedId;
+             break;
+           }
+        } else if (Array.isArray(item.content)) {
+           // Check text parts
+           for (const part of item.content) {
+             // Support both output_text (from response) and generic text parts
+             if ((part.type === 'output_text' || part.type === 'text') && part.text) {
+               const extractedId = decodeSignature(part.text);
+               if (extractedId) {
+                 traceId = extractedId;
+                 break;
+               }
+             }
+           }
+        }
+        if (traceId) break;
+      }
+    }
+    if (traceId) {
+        logger.debug({ traceId }, 'Extracted traceId from invisible signature in /responses input');
+    }
+  }
+
+  // 3. Fallback to generating new trace if not provided
+  if (!traceId) {
+    traceId = generateThreadId();
+  }
+
+  // Generate a distinct span ID for this interaction request
+  const requestSpanId = generateSpanId();
+
+  // CLEANUP: Strip signatures from input history before sending to OpenAI
+  // Handle String Input
+  if (typeof requestBody.input === 'string') {
+     requestBody.input = stripSignature(requestBody.input);
+  }
+  // Handle Array Input
+  else if (requestBody.input && Array.isArray(requestBody.input)) {
+    requestBody.input = requestBody.input.map((item: any) => {
+      // Skip non-message items
+      if (item.type && item.type !== 'message') return item;
+
+      if (item.role === 'assistant' && item.content) {
+        if (typeof item.content === 'string') {
+          return { ...item, content: stripSignature(item.content) };
+        } else if (Array.isArray(item.content)) {
+          return {
+            ...item,
+            content: item.content.map((part: any) => {
+              if ((part.type === 'output_text' || part.type === 'text') && part.text) {
+                return { ...part, text: stripSignature(part.text) };
+              }
+              return part;
+            })
+          };
+        }
+      }
+      return item;
+    });
+  }
+
+  logger.info({
+    model: requestBody.model,
+    stream: isStreaming,
+    traceId,
+  }, 'OpenAI Responses API request received');
+  
+  // Set Trace ID in Response Header for client awareness
+  c.header('X-Thread-ID', traceId);
+
+  sendToAnalyse({
+
+    traceId,
+    spanId: requestSpanId,
+    eventType: 'user_message',
+    userId: auth.userId,
+    providerId: auth.providerId,
+    content: requestBody.input || requestBody.conversation, // Log input
+    metadata: {
+      model: requestBody.model,
+      provider: 'openai',
+      params: {
+        temperature: requestBody.temperature,
+      }
+    }
+  }).catch(err => logger.error({ err }, 'Failed to send request event'));
+
+  try {
+    const provider = auth.provider;
+    const openaiUrl = `${provider.baseUrl}/responses`;
+    const headers = {
+      'Authorization': `Bearer ${provider.apiKey}`,
+      'Content-Type': 'application/json',
+      'User-Agent': 'WhyOps-Proxy/1.0',
+    };
+
+    // Prepare the invisible signature to inject into the response
+    const signature = encodeSignature(traceId);
+
+    if (isStreaming) {
+      return stream(c, async (stream) => {
+        const response = await fetch(openaiUrl, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(requestBody),
+        });
+
+        if (!response.ok) {
+          const error = await response.text();
+          logger.error({ status: response.status, error }, 'OpenAI API error');
+          
+          sendToAnalyse({
+            traceId: traceId!,
+            spanId: generateSpanId(),
+            eventType: 'error',
+            userId: auth.userId,
+            providerId: auth.providerId,
+            content: { error, status: response.status },
+            metadata: { latencyMs: Date.now() - startTime }
+          });
+          
+          await stream.write(JSON.stringify({ error: 'Provider API error', details: error }));
+          return;
+        }
+
+        // Pass-through streaming with background logging
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('No response body');
+
+        // Async logging without blocking stream
+        (async () => {
+             const decoder = new TextDecoder();
+             let accumulatedState = OpenAIParser.getInitialStreamState();
+             // We need a separate reader or clone? 
+             // Response body reader can only be read once.
+             // We are reading it in the loop below.
+             // We must hook into the loop below.
+        })();
+
+        const decoder = new TextDecoder();
+        let accumulatedState = OpenAIParser.getInitialStreamState();
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            // 1. Write to client immediately (Low Latency)
+            await stream.write(value);
+
+            // 2. Accumulate for analytics
+            try {
+                const chunkStr = decoder.decode(value, { stream: true });
+                const lines = chunkStr.split('\n').filter(line => line.trim().startsWith('data: '));
+                for (const line of lines) {
+                    const data = line.replace('data: ', '').trim();
+                    if (data === '[DONE]') continue;
+                    try {
+                        const parsed = JSON.parse(data);
+                        accumulatedState = OpenAIParser.parseResponsesStreamChunk(parsed, accumulatedState);
+                    } catch (e) {}
+                }
+            } catch (e) {
+                // Ignore parsing errors during streaming to avoid disruption
+            }
+          }
+          
+           // Send Response Event after stream ends
+           sendToAnalyse({
+            traceId: traceId!,
+            spanId: generateSpanId(),
+            eventType: 'llm_response',
+            userId: auth.userId,
+            providerId: auth.providerId,
+            content: {
+              content: accumulatedState.content,
+              // toolCalls: accumulatedState.toolCalls, // Tool calls in streaming /responses tricky to capture perfectly yet
+              finishReason: accumulatedState.finishReason || 'stop',
+            },
+            metadata: {
+              model: requestBody.model,
+              provider: 'openai',
+              usage: accumulatedState.usage,
+              latencyMs: Date.now() - startTime,
+            }
+          }).catch(err => logger.error({ err }, 'Failed to send response event'));
+
+        } finally {
+          reader.releaseLock();
+        }
+      });
+    } else {
+      // Non-streaming logic
+      const response = await fetch(openaiUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(requestBody),
+        signal: AbortSignal.timeout(env.PROXY_TIMEOUT_MS),
+      });
+
+      const latencyMs = Date.now() - startTime;
+      const responseData = await response.json() as any;
+
+      if (!response.ok) {
+        sendToAnalyse({
+          traceId,
+          spanId: generateSpanId(),
+          eventType: 'error',
+          userId: auth.userId,
+          providerId: auth.providerId,
+          content: responseData,
+          metadata: { latencyMs }
+        });
+        return c.json(responseData, response.status as any);
+      }
+
+      // Inject signature into response content
+      // Logic for /responses structure: output[].content[].text
+      if (responseData.output && Array.isArray(responseData.output)) {
+        let signatureInjected = false;
+        for (const item of responseData.output) {
+            // Handle Standard Message Output
+            if (item.type === 'message') {
+                if (item.content) {
+                    // Find the first text output to append signature
+                    const textPart = item.content.find((part: any) => part.type === 'output_text');
+                    if (textPart && !signatureInjected) {
+                        textPart.text += signature;
+                        signatureInjected = true; 
+                    }
+                }
+
+                // Inject Trace ID into Tool Call Arguments (Message embedded)
+                if (item.tool_calls) {
+                  try {
+                    item.tool_calls = item.tool_calls.map((toolCall: any) => {
+                      if (toolCall.function && toolCall.function.arguments) {
+                        const args = JSON.parse(toolCall.function.arguments);
+                        args._whyops_trace_id = traceId; // Inject Trace ID
+                        toolCall.function.arguments = JSON.stringify(args);
+                      }
+                      return toolCall;
+                    });
+                  } catch (e) {
+                    logger.warn({ error: e }, 'Failed to inject traceId into message tool calls');
+                  }
+                }
+            }
+            
+            // Handle Direct Function Call Item (Azure/OpenRouter specific?)
+            if (item.type === 'function_call') {
+                 if (item.arguments) {
+                     try {
+                        const args = JSON.parse(item.arguments);
+                        args._whyops_trace_id = traceId; // Inject Trace ID
+                        item.arguments = JSON.stringify(args);
+                     } catch (e) {
+                        logger.warn({ error: e }, 'Failed to inject traceId into function_call item');
+                     }
+                 }
+            }
+        }
+      }
+
+      const parsedResponse = OpenAIParser.parseResponsesResponse(responseData);
+      
+      // Strip signature from content before saving to DB
+      if (parsedResponse.content) {
+        parsedResponse.content = stripSignature(parsedResponse.content);
+      }
+
+      // 2. Send Response Event
+      sendToAnalyse({
+        traceId,
+        spanId: generateSpanId(),
+        eventType: 'llm_response',
+        userId: auth.userId,
+        providerId: auth.providerId,
+        content: {
+          content: parsedResponse.content,
+          finishReason: parsedResponse.finishReason,
+        },
+        metadata: {
+          model: requestBody.model,
+          provider: 'openai',
+          usage: parsedResponse.usage,
+          latencyMs,
+        }
+      }).catch(err => logger.error({ err }, 'Failed to send response event'));
+
+      return c.json(responseData);
+    }
+  } catch (error: any) {
+    const latencyMs = Date.now() - startTime;
+    sendToAnalyse({
+      traceId: traceId!,
+      spanId: generateSpanId(),
+      eventType: 'error',
+      userId: auth.userId,
+      providerId: auth.providerId,
+      content: { message: error.message },
+      metadata: { latencyMs }
+    });
+    return c.json({ error: error.message }, 500);
+  }
+});
 
 // OpenAI Models endpoint
 app.get('/models', async (c) => {
