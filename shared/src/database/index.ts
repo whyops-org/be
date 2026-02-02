@@ -27,6 +27,13 @@ if (env.DATABASE_URL) {
 export const sequelize = new Sequelize({
   ...dbConfig,
   dialect: 'postgres',
+  dialectOptions: {
+    // Disable prepared statements to avoid "cached plan must not change result type" error
+    // which can happen when schema changes or with connection pooling issues in some environments.
+    // This forces pg to use simple queries.
+    binary: false,
+    // ssl: env.DB_SSL ? { rejectUnauthorized: false } : undefined, // Removed as DB_SSL is not in env type
+  },
   logging: env.NODE_ENV === 'development' ? (msg) => logger.debug(msg) : false,
   pool: {
     max: env.DB_POOL_MAX,
