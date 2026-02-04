@@ -1,5 +1,5 @@
-import { createServiceLogger } from '@whyops/shared/logger';
 import env from '@whyops/shared/env';
+import { createServiceLogger } from '@whyops/shared/logger';
 
 const logger = createServiceLogger('proxy:analyse');
 
@@ -8,7 +8,7 @@ interface TraceEventPayload {
   spanId?: string;
   stepId?: number; // Optional, can be resolved by analyse
   parentStepId?: number; // Optional
-  eventType: 'user_message' | 'llm_response' | 'tool_call' | 'error';
+  eventType: 'user_message' | 'llm_response' | 'tool_call' | 'tool_call_request' | 'tool_call_response' | 'error';
   userId: string;
   providerId: string;
   timestamp?: string;

@@ -9,8 +9,8 @@ const app = new Hono();
 
 // Validation schemas
 const eventSchema = z.object({
-  eventType: z.enum(['user_message', 'llm_response', 'tool_call', 'error'], {
-    errorMap: () => ({ message: "Invalid event type. Must be one of: 'user_message', 'llm_response', 'tool_call', 'error'" }),
+  eventType: z.enum(['user_message', 'llm_response', 'tool_call', 'tool_call_request', 'tool_call_response', 'error'], {
+    errorMap: () => ({ message: "Invalid event type. Must be one of: 'user_message', 'llm_response', 'tool_call', 'tool_call_request', 'tool_call_response', 'error'" }),
   }),
   traceId: z.string().min(1).max(128, "Trace ID must be between 1 and 128 characters"),
   spanId: z.string().max(128, "Span ID must be at most 128 characters").optional(),
@@ -26,6 +26,47 @@ const eventSchema = z.object({
 });
 
 const batchEventSchema = z.union([eventSchema, z.array(eventSchema)]);
+
+// Schema for tool result endpoint (eventType is automatic)
+const toolResultSchema = z.object({
+  traceId: z.string().min(1).max(128, "Trace ID must be between 1 and 128 characters"),
+  spanId: z.string().max(128, "Span ID must be at most 128 characters").optional(),
+  stepId: z.number().int().min(1, "Step ID must be a positive integer").optional(),
+  parentStepId: z.number().int().min(1, "Parent Step ID must be a positive integer").optional(),
+  userId: z.string().uuid("Invalid User ID format (UUID required)"),
+  providerId: z.string().uuid("Invalid Provider ID format (UUID required)"),
+  entityName: z.string().optional(),
+  timestamp: z.string().datetime({ message: "Invalid timestamp format (ISO 8601 required)" }).optional(),
+  content: z.any().optional(),
+  metadata: z.record(z.any()).optional(),
+  idempotencyKey: z.string().max(128, "Idempotency Key must be at most 128 characters").optional(),
+});
+
+const batchToolResultSchema = z.union([toolResultSchema, z.array(toolResultSchema)]);
+
+// POST /api/events/tool-result - Create tool call response event(s) with automatic eventType
+app.post('/tool-result', zValidator('json', batchToolResultSchema, (result, c) => {
+  if (!result.success) {
+    const errors = result.error.errors.map(e => ({
+      field: e.path.join('.'),
+      message: e.message,
+      code: e.code
+    }));
+    logger.warn({ errors }, 'Tool result validation failed');
+    return c.json({ error: 'Validation failed', details: errors }, 400);
+  }
+}), async (c) => {
+  const data = await c.req.json();
+  
+  // Automatically set eventType to tool_call_response
+  if (Array.isArray(data)) {
+    data.forEach((item: any) => item.eventType = 'tool_call_response');
+  } else {
+    data.eventType = 'tool_call_response';
+  }
+  
+  return EventController.createEvent(c);
+});
 
 // POST /api/events - Create a new event (or batch of events)
 app.post('/', zValidator('json', batchEventSchema, (result, c) => {
