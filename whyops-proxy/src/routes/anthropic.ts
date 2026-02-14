@@ -126,11 +126,10 @@ app.post('/messages', async (c) => {
           logger.error({ status: response.status, error }, 'Anthropic API error');
           
           // Send error to analyse service (non-blocking)
-          sendToAnalyse({
-            eventType: 'llm_call',
+          sendToAnalyse(auth.apiKey, {
+            eventType: 'llm_response',
             threadId,
             spanId,
-            userId: auth.userId,
             providerId: provider?.id,
             entityName,
             provider: 'anthropic',
@@ -203,11 +202,10 @@ app.post('/messages', async (c) => {
 
           // Send to analyse service (non-blocking)
           const latencyMs = Date.now() - startTime;
-          sendToAnalyse({
-            eventType: 'llm_call',
+          sendToAnalyse(auth.apiKey, {
+            eventType: 'llm_response',
             threadId,
             spanId,
-            userId: auth.userId,
             providerId: provider?.id,
             entityName,
             provider: 'anthropic',
@@ -255,11 +253,10 @@ app.post('/messages', async (c) => {
         logger.error({ status: response.status, responseData }, 'Anthropic API error');
         
         // Send error to analyse service (non-blocking)
-        sendToAnalyse({
-          eventType: 'llm_call',
+        sendToAnalyse(auth.apiKey, {
+          eventType: 'llm_response',
           threadId,
           spanId,
-          userId: auth.userId,
           providerId: provider?.id,
           entityName,
           provider: 'anthropic',
@@ -273,11 +270,10 @@ app.post('/messages', async (c) => {
       }
 
       // Send to analyse service (non-blocking)
-      sendToAnalyse({
-        eventType: 'llm_call',
+      sendToAnalyse(auth.apiKey, {
+        eventType: 'llm_response',
         threadId,
         spanId,
-        userId: auth.userId,
         providerId: provider?.id,
         entityName,
         provider: 'anthropic',
@@ -308,11 +304,10 @@ app.post('/messages', async (c) => {
     logger.error({ error, threadId }, 'Request failed');
 
     // Send error to analyse service (non-blocking)
-    sendToAnalyse({
-      eventType: 'llm_call',
+    sendToAnalyse(auth.apiKey, {
+      eventType: 'llm_response',
       threadId,
       spanId,
-      userId: auth.userId,
       providerId: provider?.id,
       entityName,
       provider: 'anthropic',

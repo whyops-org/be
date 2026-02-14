@@ -1,8 +1,7 @@
 import env from '@whyops/shared/env';
 import { createServiceLogger } from '@whyops/shared/logger';
-import { decodeSignature, encodeSignature, generateSpanId, generateThreadId, stripSignature } from '@whyops/shared/utils';
 import { Provider } from '@whyops/shared/models';
-import { decrypt } from '@whyops/shared/utils';
+import { decodeSignature, decrypt, encodeSignature, generateSpanId, generateThreadId, stripSignature } from '@whyops/shared/utils';
 import { Hono } from 'hono';
 import { stream } from 'hono/streaming';
 import { OpenAIParser } from '../parsers/openai-parser';
@@ -139,13 +138,10 @@ app.post('/chat/completions', async (c) => {
   }
 
   // Send request event to analyse
-  sendToAnalyse({
+  sendToAnalyse(auth.apiKey, {
     traceId,
     spanId: requestSpanId,
     eventType: 'user_message',
-    userId: auth.userId,
-    projectId: auth.projectId,
-    environmentId: auth.environmentId,
     providerId: provider.id,
     entityName,
     content: requestBody.messages,
@@ -184,13 +180,10 @@ app.post('/chat/completions', async (c) => {
           const error = await response.text();
           logger.error({ status: response.status, error }, 'OpenAI API error');
           
-          sendToAnalyse({
+          sendToAnalyse(auth.apiKey, {
             traceId: traceId!, // Assertion as we ensure it exists
             spanId: generateSpanId(),
             eventType: 'error',
-            userId: auth.userId,
-            projectId: auth.projectId,
-            environmentId: auth.environmentId,
             providerId: provider.id,
             entityName,
             content: { error, status: response.status },
@@ -247,13 +240,10 @@ app.post('/chat/completions', async (c) => {
           }
 
           // ... (Send Response Event logic) ...
-          sendToAnalyse({
+          sendToAnalyse(auth.apiKey, {
             traceId: traceId!,
             spanId: generateSpanId(),
             eventType: 'llm_response',
-            userId: auth.userId,
-            projectId: auth.projectId,
-            environmentId: auth.environmentId,
             providerId: provider.id,
             entityName,
             content: {
@@ -287,13 +277,10 @@ app.post('/chat/completions', async (c) => {
 
       if (!response.ok) {
         // ... error handling ...
-        sendToAnalyse({
+        sendToAnalyse(auth.apiKey, {
           traceId,
           spanId: generateSpanId(),
           eventType: 'error',
-          userId: auth.userId,
-          projectId: auth.projectId,
-          environmentId: auth.environmentId,
           providerId: provider.id,
           entityName,
           content: responseData,
@@ -334,13 +321,10 @@ app.post('/chat/completions', async (c) => {
       }
 
       // 2. Send Response Event
-      sendToAnalyse({
+      sendToAnalyse(auth.apiKey, {
         traceId,
         spanId: generateSpanId(),
         eventType: 'llm_response',
-        userId: auth.userId,
-        projectId: auth.projectId,
-        environmentId: auth.environmentId,
         providerId: provider.id,
         entityName,
         content: {
@@ -361,13 +345,10 @@ app.post('/chat/completions', async (c) => {
   } catch (error: any) {
     // ... error handling ...
     const latencyMs = Date.now() - startTime;
-    sendToAnalyse({
+    sendToAnalyse(auth.apiKey, {
       traceId: traceId!,
       spanId: generateSpanId(),
       eventType: 'error',
-      userId: auth.userId,
-      projectId: auth.projectId,
-      environmentId: auth.environmentId,
       providerId: provider.id,
       entityName,
       content: { message: error.message },
@@ -387,6 +368,15 @@ app.post('/responses', async (c) => {
 
   const startTime = Date.now();
   const entityName = c.req.header('X-Entity-Name');
+
+  const { providerSlug, actualModel } = parseModelField(requestBody.model);
+
+  // Get provider - either by slug or from API key's default
+  const { provider } = await getProviderBySlugOrDefault(
+    auth.userId,
+    providerSlug,
+    auth.provider
+  );
   
   // 1. Try to find traceId from Headers
   let traceId = c.req.header('X-Thread-ID');
@@ -477,14 +467,11 @@ app.post('/responses', async (c) => {
   // Set Trace ID in Response Header for client awareness
   c.header('X-Thread-ID', traceId);
 
-  sendToAnalyse({
+  sendToAnalyse(auth.apiKey, {
 
     traceId,
     spanId: requestSpanId,
     eventType: 'user_message',
-    userId: auth.userId,
-    projectId: auth.projectId,
-    environmentId: auth.environmentId,
     providerId: provider.id,
     entityName,
     content: requestBody.input || requestBody.conversation, // Log input
@@ -521,13 +508,10 @@ app.post('/responses', async (c) => {
           const error = await response.text();
           logger.error({ status: response.status, error }, 'OpenAI API error');
           
-          sendToAnalyse({
+          sendToAnalyse(auth.apiKey, {
             traceId: traceId!,
             spanId: generateSpanId(),
             eventType: 'error',
-            userId: auth.userId,
-            projectId: auth.projectId,
-            environmentId: auth.environmentId,
             providerId: provider.id,
             entityName,
             content: { error, status: response.status },
@@ -581,13 +565,10 @@ app.post('/responses', async (c) => {
           }
           
            // Send Response Event after stream ends
-           sendToAnalyse({
+           sendToAnalyse(auth.apiKey, {
             traceId: traceId!,
             spanId: generateSpanId(),
             eventType: 'llm_response',
-            userId: auth.userId,
-            projectId: auth.projectId,
-            environmentId: auth.environmentId,
             providerId: provider.id,
             entityName,
             content: {
@@ -620,13 +601,10 @@ app.post('/responses', async (c) => {
       const responseData = await response.json() as any;
 
       if (!response.ok) {
-        sendToAnalyse({
+        sendToAnalyse(auth.apiKey, {
           traceId,
           spanId: generateSpanId(),
           eventType: 'error',
-          userId: auth.userId,
-          projectId: auth.projectId,
-          environmentId: auth.environmentId,
           providerId: provider.id,
           entityName,
           content: responseData,
@@ -691,13 +669,10 @@ app.post('/responses', async (c) => {
       }
 
       // 2. Send Response Event
-      sendToAnalyse({
+      sendToAnalyse(auth.apiKey, {
         traceId,
         spanId: generateSpanId(),
         eventType: 'llm_response',
-        userId: auth.userId,
-        projectId: auth.projectId,
-        environmentId: auth.environmentId,
         providerId: provider.id,
         entityName,
         content: {
@@ -716,13 +691,10 @@ app.post('/responses', async (c) => {
     }
   } catch (error: any) {
     const latencyMs = Date.now() - startTime;
-    sendToAnalyse({
+    sendToAnalyse(auth.apiKey, {
       traceId: traceId!,
       spanId: generateSpanId(),
       eventType: 'error',
-      userId: auth.userId,
-      projectId: auth.projectId,
-      environmentId: auth.environmentId,
       providerId: provider.id,
       entityName,
       content: { message: error.message },

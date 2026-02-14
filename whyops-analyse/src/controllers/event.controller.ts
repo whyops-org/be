@@ -9,7 +9,8 @@ export class EventController {
    * Create a new event or batch of events
    */
   static async createEvent(c: Context) {
-    const data = await c.req.json();
+    // Get data from parsed body (set by route after header merging)
+    const data = (c.req as any).parsedData || await c.req.json();
 
     try {
       if (Array.isArray(data)) {

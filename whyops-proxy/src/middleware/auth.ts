@@ -6,6 +6,7 @@ import type { Context, Next } from 'hono';
 const logger = createServiceLogger('proxy:auth');
 
 export interface AuthContext {
+  apiKey: string;
   userId: string;
   apiKeyId: string;
   projectId: string;
@@ -111,6 +112,7 @@ export async function authMiddleware(c: Context, next: Next) {
 
     // Set auth context with project and environment info
     c.set('auth', {
+      apiKey: apiKey, // Store original API key for forwarding to analyse
       userId: apiKeyRecord.userId,
       apiKeyId: apiKeyRecord.id,
       projectId: apiKeyRecord.projectId,

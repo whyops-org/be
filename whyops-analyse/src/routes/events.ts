@@ -3,11 +3,12 @@ import { createServiceLogger } from '@whyops/shared/logger';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { EventController } from '../controllers';
+import { analyseAuthMiddleware } from '../middleware/auth';
 
 const logger = createServiceLogger('analyse:events-routes');
 const app = new Hono();
 
-// Validation schemas
+// Validation schemas - userId, projectId, environmentId are optional (extracted from headers)
 const eventSchema = z.object({
   eventType: z.enum(['user_message', 'llm_response', 'tool_call', 'tool_call_request', 'tool_call_response', 'error'], {
     errorMap: () => ({ message: "Invalid event type. Must be one of: 'user_message', 'llm_response', 'tool_call', 'tool_call_request', 'tool_call_response', 'error'" }),
@@ -16,9 +17,10 @@ const eventSchema = z.object({
   spanId: z.string().max(128, "Span ID must be at most 128 characters").optional(),
   stepId: z.number().int().min(1, "Step ID must be a positive integer").optional(),
   parentStepId: z.number().int().min(1, "Parent Step ID must be a positive integer").optional(),
-  userId: z.string().uuid("Invalid User ID format (UUID required)"),
-  projectId: z.string().uuid("Invalid Project ID format (UUID required)"),
-  environmentId: z.string().uuid("Invalid Environment ID format (UUID required)"),
+  // These are optional - will be extracted from headers/API key if not provided
+  userId: z.string().uuid("Invalid User ID format (UUID required)").optional(),
+  projectId: z.string().uuid("Invalid Project ID format (UUID required)").optional(),
+  environmentId: z.string().uuid("Invalid Environment ID format (UUID required)").optional(),
   providerId: z.string().uuid("Invalid Provider ID format (UUID required)").optional(),
   entityName: z.string().optional(),
   timestamp: z.string().datetime({ message: "Invalid timestamp format (ISO 8601 required)" }).optional(),
@@ -35,9 +37,9 @@ const toolResultSchema = z.object({
   spanId: z.string().max(128, "Span ID must be at most 128 characters").optional(),
   stepId: z.number().int().min(1, "Step ID must be a positive integer").optional(),
   parentStepId: z.number().int().min(1, "Parent Step ID must be a positive integer").optional(),
-  userId: z.string().uuid("Invalid User ID format (UUID required)"),
-  projectId: z.string().uuid("Invalid Project ID format (UUID required)"),
-  environmentId: z.string().uuid("Invalid Environment ID format (UUID required)"),
+  userId: z.string().uuid("Invalid User ID format (UUID required)").optional(),
+  projectId: z.string().uuid("Invalid Project ID format (UUID required)").optional(),
+  environmentId: z.string().uuid("Invalid Environment ID format (UUID required)").optional(),
   providerId: z.string().uuid("Invalid Provider ID format (UUID required)").optional(),
   entityName: z.string().optional(),
   timestamp: z.string().datetime({ message: "Invalid timestamp format (ISO 8601 required)" }).optional(),
@@ -48,44 +50,91 @@ const toolResultSchema = z.object({
 
 const batchToolResultSchema = z.union([toolResultSchema, z.array(toolResultSchema)]);
 
+// Helper to process data and extract auth info
+function processEventData(
+  data: any,
+  auth: any,
+  headers: { userId?: string; projectId?: string; environmentId?: string }
+) {
+  const processItem = (item: any) => ({
+    ...item,
+    userId: item.userId || auth?.userId || headers.userId,
+    projectId: item.projectId || auth?.projectId || headers.projectId,
+    environmentId: item.environmentId || auth?.environmentId || headers.environmentId,
+  });
+
+  return Array.isArray(data) ? data.map(processItem) : processItem(data);
+}
+
 // POST /api/events/tool-result - Create tool call response event(s) with automatic eventType
-app.post('/tool-result', zValidator('json', batchToolResultSchema, (result, c) => {
-  if (!result.success) {
-    const errors = result.error.errors.map(e => ({
-      field: e.path.join('.'),
-      message: e.message,
-      code: e.code
-    }));
-    logger.warn({ errors }, 'Tool result validation failed');
-    return c.json({ error: 'Validation failed', details: errors }, 400);
+app.post(
+  '/tool-result',
+  analyseAuthMiddleware,
+  zValidator('json', batchToolResultSchema, (result, c) => {
+    if (!result.success) {
+      const errors = result.error.errors.map((e) => ({
+        field: e.path.join('.'),
+        message: e.message,
+        code: e.code,
+      }));
+      logger.warn({ errors }, 'Tool result validation failed');
+      return c.json({ error: 'Validation failed', details: errors }, 400);
+    }
+  }),
+  async (c) => {
+    const data = await c.req.json();
+    const auth = c.get('analyseAuth');
+
+    // Extract auth info from headers or auth middleware
+    const headers = {
+      userId: c.req.header('X-User-Id'),
+      projectId: c.req.header('X-Project-Id'),
+      environmentId: c.req.header('X-Environment-Id'),
+    };
+
+    const processedData = processEventData(data, auth, headers);
+
+    // Set req.json to return processed data
+    (c as any).req.parsedData = processedData;
+
+    return EventController.createEvent(c);
   }
-}), async (c) => {
-  const data = await c.req.json();
-  
-  // Automatically set eventType to tool_call_response
-  if (Array.isArray(data)) {
-    data.forEach((item: any) => item.eventType = 'tool_call_response');
-  } else {
-    data.eventType = 'tool_call_response';
-  }
-  
-  return EventController.createEvent(c);
-});
+);
 
 // POST /api/events - Create a new event (or batch of events)
-app.post('/', zValidator('json', batchEventSchema, (result, c) => {
-  if (!result.success) {
-    const errors = result.error.errors.map(e => ({
-      field: e.path.join('.'),
-      message: e.message,
-      code: e.code
-    }));
-    logger.warn({ errors }, 'Event validation failed');
-    return c.json({ error: 'Validation failed', details: errors }, 400);
+app.post(
+  '/',
+  analyseAuthMiddleware,
+  zValidator('json', batchEventSchema, (result, c) => {
+    if (!result.success) {
+      const errors = result.error.errors.map((e) => ({
+        field: e.path.join('.'),
+        message: e.message,
+        code: e.code,
+      }));
+      logger.warn({ errors }, 'Event validation failed');
+      return c.json({ error: 'Validation failed', details: errors }, 400);
+    }
+  }),
+  async (c) => {
+    const data = await c.req.json();
+    const auth = c.get('analyseAuth');
+
+    // Extract auth info from headers or auth middleware
+    const headers = {
+      userId: c.req.header('X-User-Id'),
+      projectId: c.req.header('X-Project-Id'),
+      environmentId: c.req.header('X-Environment-Id'),
+    };
+
+    const processedData = processEventData(data, auth, headers);
+
+    // Override req.json to return processed data
+    (c as any).req.parsedData = processedData;
+
+    return EventController.createEvent(c);
   }
-}), async (c) => {
-  return EventController.createEvent(c);
-});
+);
 
 // GET /api/events - List events (with filters)
 app.get('/', EventController.listEvents);

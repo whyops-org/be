@@ -3,50 +3,63 @@ import { createServiceLogger } from '@whyops/shared/logger';
 
 const logger = createServiceLogger('proxy:analyse');
 
+type EventType = 'user_message' | 'llm_response' | 'tool_call' | 'tool_call_request' | 'tool_call_response' | 'error';
+
 interface TraceEventPayload {
-  traceId: string;
+  // Required fields
+  eventType: EventType;
+  // Optional common fields
+  traceId?: string;
+  threadId?: string; // Legacy - maps to traceId
   spanId?: string;
-  stepId?: number; // Optional, can be resolved by analyse
-  parentStepId?: number; // Optional
-  eventType: 'user_message' | 'llm_response' | 'tool_call' | 'tool_call_request' | 'tool_call_response' | 'error';
-  userId: string;
-  projectId: string;
-  environmentId: string;
+  stepId?: number;
+  parentStepId?: number;
   providerId?: string;
   entityName?: string;
   timestamp?: string;
-  content: any;
-  metadata?: Record<string, any>;
+  content?: unknown;
+  metadata?: Record<string, unknown>;
+  // Allow additional fields for flexibility
+  [key: string]: unknown;
 }
 
 /**
  * Send trace event data to the analyse service (non-blocking)
- * This is fire-and-forget to ensure zero latency impact on proxy
+ * Only forwards the API key - all auth info is extracted by the events API
  */
-export async function sendToAnalyse(payload: TraceEventPayload): Promise<void> {
+export async function sendToAnalyse(
+  apiKey: string,
+  payload: TraceEventPayload
+): Promise<void> {
   try {
     const analyseUrl = `${env.ANALYSE_URL}/api/events`;
-    
-    // Fire-and-forget request
+
+    // Normalize threadId to traceId
+    const normalizedPayload = {
+      ...payload,
+      traceId: payload.traceId || payload.threadId,
+    };
+
+    // Fire-and-forget request - only forward API key
     fetch(analyseUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Internal-Service': 'proxy',
+        'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        ...payload,
-        timestamp: payload.timestamp || new Date().toISOString(),
+        ...normalizedPayload,
+        timestamp: normalizedPayload.timestamp || new Date().toISOString(),
       }),
       // Use keepalive to allow request to continue even if response is not read
       // @ts-ignore - keepalive is valid but not in TypeScript types yet
       keepalive: true,
     }).catch((error) => {
       // Log error but don't throw - this is non-blocking
-      logger.error({ error, traceId: payload.traceId }, 'Failed to send to analyse service');
+      logger.error({ error, traceId: normalizedPayload.traceId }, 'Failed to send to analyse service');
     });
 
-    logger.debug({ traceId: payload.traceId, eventType: payload.eventType }, 'Event sent to analyse service');
+    logger.debug({ traceId: normalizedPayload.traceId, eventType: normalizedPayload.eventType }, 'Event sent to analyse service');
   } catch (error) {
     // Never throw errors - this is non-blocking
     logger.error({ error }, 'Error in sendToAnalyse');
