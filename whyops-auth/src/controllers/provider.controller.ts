@@ -2,6 +2,7 @@ import { createServiceLogger } from '@whyops/shared/logger';
 import { Context } from 'hono';
 import { CreateProviderData, ProviderService, UpdateProviderData } from '../services';
 import { ResponseUtil } from '../utils';
+import { testProvider } from '../providers';
 
 const logger = createServiceLogger('auth:provider-controller');
 
@@ -160,46 +161,23 @@ export class ProviderController {
   static async testProvider(c: Context) {
     try {
       const data = await c.req.json();
-      const { type, baseUrl, apiKey } = data;
+      const { type, baseUrl, apiKey, model } = data;
 
-      let success = false;
-      let message = '';
-
-      if (type === 'openai') {
-        // Test OpenAI connection
-        const response = await fetch(`${baseUrl}/models`, {
-          method: 'GET',
-          headers: {
-            'Authorization': `Bearer ${apiKey}`,
-          },
-          signal: AbortSignal.timeout(10000),
-        });
-        success = response.ok;
-        message = success ? 'Successfully connected to OpenAI' : `Failed to connect: ${response.statusText}`;
-      } else if (type === 'anthropic') {
-        // Test Anthropic connection - make a minimal request
-        const response = await fetch(`${baseUrl}/v1/messages`, {
-          method: 'POST',
-          headers: {
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: 'claude-3-haiku-20240307',
-            max_tokens: 1,
-            messages: [{ role: 'user', content: 'Hi' }],
-          }),
-          signal: AbortSignal.timeout(10000),
-        });
-        success = response.ok;
-        message = success ? 'Successfully connected to Anthropic' : `Failed to connect: ${response.statusText}`;
+      if (!model) {
+        return ResponseUtil.badRequest(c, 'Model is required for testing');
       }
 
-      if (success) {
-        return ResponseUtil.success(c, { success: true, message });
+      // Use the scalable provider test implementation
+      const result = await testProvider(type, {
+        baseUrl,
+        apiKey,
+        model,
+      });
+
+      if (result.success) {
+        return ResponseUtil.success(c, { success: true, message: result.message });
       } else {
-        return ResponseUtil.badRequest(c, message);
+        return ResponseUtil.badRequest(c, result.message);
       }
     } catch (error: any) {
       logger.error({ error }, 'Failed to test provider connection');

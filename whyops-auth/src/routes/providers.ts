@@ -20,6 +20,7 @@ const testProviderSchema = z.object({
   type: z.enum(['openai', 'anthropic']),
   baseUrl: z.string().url(),
   apiKey: z.string().min(1),
+  model: z.string().min(1),
 });
 
 // GET /api/providers - List all providers for user
