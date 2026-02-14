@@ -4,7 +4,7 @@ import { decodeSignature, encodeSignature, generateSpanId, generateThreadId, str
 import { Hono } from 'hono';
 import { OpenAIParser } from '../parsers/openai-parser';
 import { dispatchAnalyseEvent } from '../services/async-events';
-import { copyProxyResponseHeaders, resolveProviderFromModel } from '../services/proxy-routing';
+import { copyProxyResponseHeaders, resolveProviderFromModel, validateResolvedProvider } from '../services/proxy-routing';
 import { SseEventDecoder } from '../services/sse';
 
 const logger = createServiceLogger('proxy:openai');
@@ -22,7 +22,7 @@ async function trackChatCompletionsStream(
   streamBody: ReadableStream<Uint8Array>,
   apiKey: string,
   traceId: string,
-  providerId: string,
+  providerId: string | undefined,
   agentName: string,
   model: string,
   startTime: number
@@ -92,7 +92,7 @@ async function trackResponsesStream(
   streamBody: ReadableStream<Uint8Array>,
   apiKey: string,
   traceId: string,
-  providerId: string,
+  providerId: string | undefined,
   agentName: string,
   model: string,
   startTime: number
@@ -175,6 +175,11 @@ app.post('/chat/completions', async (c) => {
     requestBody.model,
     auth.provider
   );
+
+  const providerValidation = validateResolvedProvider(provider);
+  if (!providerValidation.valid) {
+    return c.json({ error: providerValidation.message }, 400);
+  }
 
   // Use actual model for the API call
   requestBody.model = actualModel;
@@ -495,6 +500,10 @@ app.post('/responses', async (c) => {
     requestBody.model,
     auth.provider
   );
+  const providerValidation = validateResolvedProvider(provider);
+  if (!providerValidation.valid) {
+    return c.json({ error: providerValidation.message }, 400);
+  }
   requestBody.model = actualModel;
   
   // 1. Try to find traceId from Headers
@@ -784,7 +793,12 @@ app.get('/models', async (c) => {
   const auth = c.get('auth');
   
   try {
-    const provider = auth.provider;
+    const { provider } = await resolveProviderFromModel(auth.userId, 'models', auth.provider);
+    const providerValidation = validateResolvedProvider(provider);
+    if (!providerValidation.valid) {
+      return c.json({ error: providerValidation.message }, 400);
+    }
+
     const response = await fetch(`${provider.baseUrl}/models`, {
       headers: {
         'Authorization': `Bearer ${provider.apiKey}`,

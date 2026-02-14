@@ -1,7 +1,7 @@
-import { sequelize } from './index';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { sequelize } from './index';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,14 +45,21 @@ async function migrate() {
       const migrationPath = path.join(migrationsDir, file);
       const migration = await import(migrationPath);
 
-      if (migration.default && typeof migration.default.up === 'function') {
-        await migration.default.up(sequelize.getQueryInterface());
+      const up =
+        (typeof migration?.up === 'function' && migration.up) ||
+        (typeof migration?.default?.up === 'function' && migration.default.up);
+
+      if (up) {
+        await up(sequelize.getQueryInterface());
         
         // Record migration
-        await sequelize.query(`INSERT INTO "SequelizeMeta" ("name") VALUES ('${file}')`);
+        await sequelize.query(
+          'INSERT INTO "SequelizeMeta" ("name") VALUES (:name)',
+          { replacements: { name: file } }
+        );
         console.log(`Completed migration: ${file}`);
       } else {
-        console.error(`Migration ${file} is missing 'up' function.`);
+        console.error(`Migration ${file} is missing an exported 'up' function.`);
       }
     }
 

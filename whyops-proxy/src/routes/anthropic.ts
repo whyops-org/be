@@ -3,7 +3,7 @@ import { createServiceLogger } from '@whyops/shared/logger';
 import { generateSpanId, generateThreadId } from '@whyops/shared/utils';
 import { Hono } from 'hono';
 import { dispatchAnalyseEvent } from '../services/async-events';
-import { copyProxyResponseHeaders, resolveProviderFromModel } from '../services/proxy-routing';
+import { copyProxyResponseHeaders, resolveProviderFromModel, validateResolvedProvider } from '../services/proxy-routing';
 import { SseEventDecoder } from '../services/sse';
 
 const logger = createServiceLogger('proxy:anthropic');
@@ -132,6 +132,11 @@ app.post('/messages', async (c) => {
     requestBody.model,
     auth.provider
   );
+
+  const providerValidation = validateResolvedProvider(provider);
+  if (!providerValidation.valid) {
+    return c.json({ error: providerValidation.message }, 400);
+  }
 
   // Use actual model for the API call
   requestBody.model = actualModel;

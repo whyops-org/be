@@ -1,15 +1,16 @@
-import { Hono } from 'hono';
-import { logger as honoLogger } from 'hono/logger';
-import { cors } from 'hono/cors';
-import { createServiceLogger } from '@whyops/shared/logger';
 import env from '@whyops/shared/env';
+import { createServiceLogger } from '@whyops/shared/logger';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { logger as honoLogger } from 'hono/logger';
 import { authMiddleware } from './middleware/auth';
+import { errorHandler } from './middleware/error';
 import { rateLimitMiddleware } from './middleware/rateLimit';
 import { requestLogMiddleware } from './middleware/requestLog';
-import { errorHandler } from './middleware/error';
-import openaiRouter from './routes/openai';
+import agentsRouter from './routes/agents';
 import anthropicRouter from './routes/anthropic';
 import healthRouter from './routes/health';
+import openaiRouter from './routes/openai';
 
 const logger = createServiceLogger('proxy');
 const app = new Hono();
@@ -29,6 +30,7 @@ app.use('/v1/*', rateLimitMiddleware);
 // Provider routes
 app.route('/v1', openaiRouter);
 app.route('/v1', anthropicRouter);
+app.route('/v1', agentsRouter);
 
 // Error handler
 app.onError(errorHandler);

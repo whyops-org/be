@@ -4,11 +4,80 @@ import { decrypt } from '@whyops/shared/utils';
 
 const logger = createServiceLogger('proxy:routing');
 
+function isLikelyHeaderSafe(value: string): boolean {
+  if (!value || typeof value !== 'string') return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const charCode = value.charCodeAt(index);
+    if (charCode < 32 || charCode > 126) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function normalizeProviderApiKey(apiKey: unknown): string {
+  const rawApiKey = String(apiKey || '');
+
+  if (!rawApiKey) {
+    return rawApiKey;
+  }
+
+  try {
+    const decryptedApiKey = decrypt(rawApiKey);
+
+    if (isLikelyHeaderSafe(decryptedApiKey) && decryptedApiKey.length >= 8) {
+      return decryptedApiKey;
+    }
+  } catch {
+    // Fall back to raw key below
+  }
+
+  return rawApiKey;
+}
+
+function normalizeProvider(provider: any): any {
+  if (!provider) {
+    return provider;
+  }
+
+  const plainProvider = typeof provider.toJSON === 'function' ? provider.toJSON() : provider;
+
+  return {
+    ...plainProvider,
+    apiKey: normalizeProviderApiKey(plainProvider.apiKey),
+  };
+}
+
 export interface ResolvedProvider {
   provider: any;
   isCustom: boolean;
   providerSlug: string | null;
   actualModel: string;
+}
+
+export function validateResolvedProvider(provider: any): { valid: boolean; message?: string } {
+  if (!provider) {
+    return {
+      valid: false,
+      message: 'No provider configured for this API key. Add a provider or use a provider-slug/model format.',
+    };
+  }
+
+  if (!provider.baseUrl) {
+    return {
+      valid: false,
+      message: 'Configured provider is missing baseUrl.',
+    };
+  }
+
+  if (!provider.apiKey) {
+    return {
+      valid: false,
+      message: 'Configured provider is missing apiKey.',
+    };
+  }
+
+  return { valid: true };
 }
 
 export function parseModelField(model: string): { providerSlug: string | null; actualModel: string } {
@@ -30,7 +99,7 @@ export async function getProviderBySlugOrDefault(
   defaultProvider: any
 ): Promise<{ provider: any; isCustom: boolean }> {
   if (!providerSlug) {
-    return { provider: defaultProvider, isCustom: false };
+    return { provider: normalizeProvider(defaultProvider), isCustom: false };
   }
 
   const provider = await Provider.findOne({
@@ -42,18 +111,14 @@ export async function getProviderBySlugOrDefault(
   });
 
   if (provider) {
-    const decryptedApiKey = decrypt(provider.apiKey);
     return {
-      provider: {
-        ...provider.toJSON(),
-        apiKey: decryptedApiKey,
-      },
+      provider: normalizeProvider(provider),
       isCustom: true,
     };
   }
 
   logger.warn({ providerSlug }, 'Provider slug not found, using default');
-  return { provider: defaultProvider, isCustom: false };
+  return { provider: normalizeProvider(defaultProvider), isCustom: false };
 }
 
 export async function resolveProviderFromModel(
