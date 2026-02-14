@@ -22,7 +22,7 @@ const eventSchema = z.object({
   projectId: z.string().uuid("Invalid Project ID format (UUID required)").optional(),
   environmentId: z.string().uuid("Invalid Environment ID format (UUID required)").optional(),
   providerId: z.string().uuid("Invalid Provider ID format (UUID required)").optional(),
-  entityName: z.string().optional(),
+  agentName: z.string().min(1, 'agentName is required').max(255),
   timestamp: z.string().datetime({ message: "Invalid timestamp format (ISO 8601 required)" }).optional(),
   content: z.any().optional(),
   metadata: z.record(z.any()).optional(),
@@ -41,7 +41,7 @@ const toolResultSchema = z.object({
   projectId: z.string().uuid("Invalid Project ID format (UUID required)").optional(),
   environmentId: z.string().uuid("Invalid Environment ID format (UUID required)").optional(),
   providerId: z.string().uuid("Invalid Provider ID format (UUID required)").optional(),
-  entityName: z.string().optional(),
+  agentName: z.string().min(1, 'agentName is required').max(255),
   timestamp: z.string().datetime({ message: "Invalid timestamp format (ISO 8601 required)" }).optional(),
   content: z.any().optional(),
   metadata: z.record(z.any()).optional(),
@@ -58,6 +58,7 @@ function processEventData(
 ) {
   const processItem = (item: any) => ({
     ...item,
+    agentName: item.agentName || item.entityName,
     userId: item.userId || auth?.userId || headers.userId,
     projectId: item.projectId || auth?.projectId || headers.projectId,
     environmentId: item.environmentId || auth?.environmentId || headers.environmentId,
@@ -93,9 +94,12 @@ app.post(
     };
 
     const processedData = processEventData(data, auth, headers);
+    const withEventType = Array.isArray(processedData)
+      ? processedData.map((item: any) => ({ ...item, eventType: 'tool_call_response' as const }))
+      : { ...processedData, eventType: 'tool_call_response' as const };
 
     // Set req.json to return processed data
-    (c as any).req.parsedData = processedData;
+    (c as any).req.parsedData = withEventType;
 
     return EventController.createEvent(c);
   }

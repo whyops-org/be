@@ -7,7 +7,7 @@ const logger = createServiceLogger('analyse:thread-service');
 export interface ThreadListItem {
   threadId: string;
   userId: string;
-  providerId: string;
+  providerId?: string;
   entityId?: string;
   entityName?: string;
   lastActivity: Date;
@@ -33,7 +33,7 @@ export interface EventDetail {
 export interface ThreadDetail {
   threadId: string;
   userId: string;
-  providerId: string;
+  providerId?: string;
   entityId?: string;
   entityName?: string;
   model?: string;

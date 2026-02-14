@@ -18,6 +18,7 @@ export class SamplingService {
    */
   static async shouldSampleEvent(
     userId: string,
+    environmentId: string,
     entityName: string | undefined,
     eventHash: string
   ): Promise<SamplingResult> {
@@ -29,7 +30,7 @@ export class SamplingService {
     try {
       // Fetch entity with sampling configuration
       const entity = await Entity.findOne({
-        where: { userId, name: entityName },
+        where: { userId, environmentId, name: entityName },
         order: [['createdAt', 'DESC']],
       });
 
@@ -60,7 +61,7 @@ export class SamplingService {
           : `Event rejected by sampling (rate: ${entity.samplingRate}, hash: ${hashValue.toFixed(4)})`,
       };
     } catch (error) {
-      logger.error({ error, userId, entityName }, 'Error in sampling decision, defaulting to sample');
+      logger.error({ error, userId, environmentId, entityName }, 'Error in sampling decision, defaulting to sample');
       return { shouldSample: true, reason: 'Error in sampling, defaulting to accept' };
     }
   }

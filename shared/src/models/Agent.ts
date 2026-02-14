@@ -1,50 +1,32 @@
 import { DataTypes, Model } from 'sequelize';
 import sequelize from '../database';
 
-export interface EntityAttributes {
-  id?: string; // UUID - optional for creation, auto-generated
-  agentId?: string;
+export interface AgentAttributes {
+  id?: string;
   userId: string;
   projectId: string;
   environmentId: string;
-  name: string; // Agent Name
-  hash: string; // Hash of metadata (tools, system prompt, etc.)
-  metadata: Record<string, any>; // system prompt, tools, etc.
-  samplingRate: number; // Sampling rate (0-1), controls trace storage probability
+  name: string;
   createdAt?: Date;
   updatedAt?: Date;
 }
 
-export class Entity extends Model<EntityAttributes> implements EntityAttributes {
+export class Agent extends Model<AgentAttributes> implements AgentAttributes {
   declare id: string;
-  declare agentId?: string;
   declare userId: string;
   declare projectId: string;
   declare environmentId: string;
   declare name: string;
-  declare hash: string;
-  declare metadata: Record<string, any>;
-  declare samplingRate: number;
   declare createdAt: Date;
   declare updatedAt: Date;
 }
 
-Entity.init(
+Agent.init(
   {
     id: {
       type: DataTypes.UUID,
       defaultValue: DataTypes.UUIDV4,
       primaryKey: true,
-    },
-    agentId: {
-      type: DataTypes.UUID,
-      allowNull: true,
-      field: 'agent_id',
-      references: {
-        model: 'agents',
-        key: 'id',
-      },
-      onDelete: 'CASCADE',
     },
     userId: {
       type: DataTypes.STRING,
@@ -80,25 +62,6 @@ Entity.init(
       type: DataTypes.STRING,
       allowNull: false,
     },
-    hash: {
-      type: DataTypes.STRING,
-      allowNull: false,
-    },
-    metadata: {
-      type: DataTypes.JSONB,
-      allowNull: false,
-      defaultValue: {},
-    },
-    samplingRate: {
-      type: DataTypes.DECIMAL(3, 2),
-      allowNull: false,
-      defaultValue: 1.0,
-      field: 'sampling_rate',
-      validate: {
-        min: 0,
-        max: 1,
-      },
-    },
     createdAt: {
       type: DataTypes.DATE,
       defaultValue: DataTypes.NOW,
@@ -112,25 +75,19 @@ Entity.init(
   },
   {
     sequelize,
-    tableName: 'entities',
+    tableName: 'agents',
     timestamps: true,
     underscored: true,
     indexes: [
       {
         unique: true,
-        fields: ['environment_id', 'name', 'hash'],
+        fields: ['environment_id', 'name'],
       },
       {
-        fields: ['agent_id'],
+        fields: ['user_id', 'project_id'],
       },
-      {
-         fields: ['user_id', 'project_id']
-      },
-      {
-         fields: ['environment_id']
-      }
-    ]
+    ],
   }
 );
 
-export default Entity;
+export default Agent;

@@ -1,72 +1,160 @@
 import env from '@whyops/shared/env';
 import { createServiceLogger } from '@whyops/shared/logger';
-import { Provider } from '@whyops/shared/models';
-import { decodeSignature, decrypt, encodeSignature, generateSpanId, generateThreadId, stripSignature } from '@whyops/shared/utils';
+import { decodeSignature, encodeSignature, generateSpanId, generateThreadId, stripSignature } from '@whyops/shared/utils';
 import { Hono } from 'hono';
-import { stream } from 'hono/streaming';
 import { OpenAIParser } from '../parsers/openai-parser';
-import { sendToAnalyse } from '../services/analyse';
+import { dispatchAnalyseEvent } from '../services/async-events';
+import { copyProxyResponseHeaders, resolveProviderFromModel } from '../services/proxy-routing';
+import { SseEventDecoder } from '../services/sse';
 
 const logger = createServiceLogger('proxy:openai');
 const app = new Hono();
 
-/**
- * Parse model field to extract provider slug and actual model name
- * Format: "provider-slug/model-name" or just "model-name"
- * Returns: { providerSlug: string | null, model: string }
- */
-function parseModelField(model: string): { providerSlug: string | null; actualModel: string } {
-  if (!model || !model.includes('/')) {
-    return { providerSlug: null, actualModel: model };
+function responseFromUpstreamError(status: number, contentType: string | null, body: string): Response {
+  const headers = new Headers();
+  if (contentType) {
+    headers.set('content-type', contentType);
   }
-
-  const parts = model.split('/');
-  // If it looks like a slug (contains dash), treat first part as slug
-  if (parts[0].includes('-')) {
-    return { providerSlug: parts[0], actualModel: parts.slice(1).join('/') };
-  }
-
-  // Otherwise, treat as just model name
-  return { providerSlug: null, actualModel: model };
+  return new Response(body, { status, headers });
 }
 
-/**
- * Get provider by slug or return default from auth context
- */
-async function getProviderBySlugOrDefault(
-  userId: string,
-  providerSlug: string | null,
-  defaultProvider: any
-): Promise<{ provider: any; isCustom: boolean }> {
-  // If no slug provided, use default provider from API key
-  if (!providerSlug) {
-    return { provider: defaultProvider, isCustom: false };
-  }
+async function trackChatCompletionsStream(
+  streamBody: ReadableStream<Uint8Array>,
+  apiKey: string,
+  traceId: string,
+  providerId: string,
+  agentName: string,
+  model: string,
+  startTime: number
+): Promise<void> {
+  const reader = streamBody.getReader();
+  const decoder = new TextDecoder();
+  const sseDecoder = new SseEventDecoder();
+  let accumulatedState = OpenAIParser.getInitialStreamState();
 
-  // Try to find provider by slug
-  const provider = await Provider.findOne({
-    where: {
-      userId,
-      slug: providerSlug,
-      isActive: true,
-    },
-  });
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-  if (provider) {
-    // Decrypt the API key
-    const decryptedApiKey = decrypt(provider.apiKey);
-    return {
-      provider: {
-        ...provider.toJSON(),
-        apiKey: decryptedApiKey,
+      const textChunk = decoder.decode(value, { stream: true });
+      const events = sseDecoder.push(textChunk);
+
+      for (const data of events) {
+        if (data === '[DONE]') {
+          continue;
+        }
+
+        try {
+          const parsed = JSON.parse(data);
+          accumulatedState = OpenAIParser.parseStreamChunk(parsed, accumulatedState);
+        } catch {
+          // Ignore malformed chunks for analytics only path
+        }
+      }
+    }
+
+    const finalEvents = sseDecoder.flush();
+    for (const data of finalEvents) {
+      if (data === '[DONE]') continue;
+      try {
+        const parsed = JSON.parse(data);
+        accumulatedState = OpenAIParser.parseStreamChunk(parsed, accumulatedState);
+      } catch {
+        // Ignore malformed chunks for analytics only path
+      }
+    }
+
+    dispatchAnalyseEvent(apiKey, {
+      traceId,
+      spanId: generateSpanId(),
+      eventType: 'llm_response',
+      providerId,
+      agentName,
+      content: {
+        content: accumulatedState.content,
+        toolCalls: accumulatedState.toolCalls,
+        finishReason: accumulatedState.finishReason,
       },
-      isCustom: true,
-    };
+      metadata: {
+        model,
+        provider: 'openai',
+        usage: accumulatedState.usage,
+        latencyMs: Date.now() - startTime,
+      }
+    });
+  } finally {
+    reader.releaseLock();
   }
+}
 
-  // Fall back to default provider if slug not found
-  logger.warn({ providerSlug }, 'Provider slug not found, using default');
-  return { provider: defaultProvider, isCustom: false };
+async function trackResponsesStream(
+  streamBody: ReadableStream<Uint8Array>,
+  apiKey: string,
+  traceId: string,
+  providerId: string,
+  agentName: string,
+  model: string,
+  startTime: number
+): Promise<void> {
+  const reader = streamBody.getReader();
+  const decoder = new TextDecoder();
+  const sseDecoder = new SseEventDecoder();
+  let accumulatedState = OpenAIParser.getInitialStreamState();
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const textChunk = decoder.decode(value, { stream: true });
+      const events = sseDecoder.push(textChunk);
+
+      for (const data of events) {
+        if (data === '[DONE]') {
+          continue;
+        }
+
+        try {
+          const parsed = JSON.parse(data);
+          accumulatedState = OpenAIParser.parseResponsesStreamChunk(parsed, accumulatedState);
+        } catch {
+          // Ignore malformed chunks for analytics only path
+        }
+      }
+    }
+
+    const finalEvents = sseDecoder.flush();
+    for (const data of finalEvents) {
+      if (data === '[DONE]') continue;
+      try {
+        const parsed = JSON.parse(data);
+        accumulatedState = OpenAIParser.parseResponsesStreamChunk(parsed, accumulatedState);
+      } catch {
+        // Ignore malformed chunks for analytics only path
+      }
+    }
+
+    dispatchAnalyseEvent(apiKey, {
+      traceId,
+      spanId: generateSpanId(),
+      eventType: 'llm_response',
+      providerId,
+      agentName,
+      content: {
+        content: accumulatedState.content,
+        finishReason: accumulatedState.finishReason || 'stop',
+      },
+      metadata: {
+        model,
+        provider: 'openai',
+        usage: accumulatedState.usage,
+        latencyMs: Date.now() - startTime,
+      }
+    });
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 // OpenAI Chat Completions endpoint
@@ -76,15 +164,15 @@ app.post('/chat/completions', async (c) => {
   const isStreaming = requestBody.stream === true;
 
   const startTime = Date.now();
-  const entityName = c.req.header('X-Entity-Name');
+  const agentName = c.req.header('X-Agent-Name');
 
-  // Parse provider slug from model field (format: provider-slug/model or just model)
-  const { providerSlug, actualModel } = parseModelField(requestBody.model);
+  if (!agentName) {
+    return c.json({ error: 'Missing required header: X-Agent-Name' }, 400);
+  }
 
-  // Get provider - either by slug or from API key's default
-  const { provider, isCustom } = await getProviderBySlugOrDefault(
+  const { provider, isCustom, providerSlug, actualModel } = await resolveProviderFromModel(
     auth.userId,
-    providerSlug,
+    requestBody.model,
     auth.provider
   );
 
@@ -92,7 +180,7 @@ app.post('/chat/completions', async (c) => {
   requestBody.model = actualModel;
 
   // 1. Try to find traceId from Headers
-  let traceId = c.req.header('X-Thread-ID');
+  let traceId = c.req.header('X-Trace-ID') || c.req.header('X-Thread-ID');
 
   // 2. If not found, try to extract hidden signature from the last assistant message
   if (!traceId && requestBody.messages?.length > 0) {
@@ -138,12 +226,12 @@ app.post('/chat/completions', async (c) => {
   }
 
   // Send request event to analyse
-  sendToAnalyse(auth.apiKey, {
+  dispatchAnalyseEvent(auth.apiKey, {
     traceId,
     spanId: requestSpanId,
     eventType: 'user_message',
     providerId: provider.id,
-    entityName,
+    agentName,
     content: requestBody.messages,
     metadata: {
       model: actualModel,
@@ -154,7 +242,7 @@ app.post('/chat/completions', async (c) => {
         maxTokens: requestBody.max_tokens,
       }
     }
-  }).catch(err => logger.error({ err }, 'Failed to send request event'));
+  });
 
   try {
     const openaiUrl = `${provider.baseUrl}/chat/completions`;
@@ -168,100 +256,129 @@ app.post('/chat/completions', async (c) => {
     const signature = encodeSignature(traceId);
 
     if (isStreaming) {
-      return stream(c, async (stream) => {
-        const response = await fetch(openaiUrl, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(requestBody),
+      const response = await fetch(openaiUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        logger.error({ status: response.status, errorBody }, 'OpenAI API error');
+
+        dispatchAnalyseEvent(auth.apiKey, {
+          traceId,
+          spanId: generateSpanId(),
+          eventType: 'error',
+          providerId: provider.id,
+          agentName,
+          content: { error: errorBody, status: response.status },
+          metadata: { latencyMs: Date.now() - startTime }
         });
 
-        if (!response.ok) {
-          // ... error handling ...
-          const error = await response.text();
-          logger.error({ status: response.status, error }, 'OpenAI API error');
-          
-          sendToAnalyse(auth.apiKey, {
-            traceId: traceId!, // Assertion as we ensure it exists
-            spanId: generateSpanId(),
-            eventType: 'error',
-            providerId: provider.id,
-            entityName,
-            content: { error, status: response.status },
-            metadata: { latencyMs: Date.now() - startTime }
-          });
-          
-          await stream.write(JSON.stringify({ error: 'Provider API error', details: error }));
-          return;
-        }
+        return responseFromUpstreamError(response.status, response.headers.get('content-type'), errorBody);
+      }
 
-        let accumulatedState = OpenAIParser.getInitialStreamState();
-        const reader = response.body?.getReader();
-        const decoder = new TextDecoder();
-        let signatureSent = false;
+      if (!response.body) {
+        throw new Error('No response body');
+      }
 
-        if (!reader) throw new Error('No response body');
+      const [clientBranch, analyticsBranch] = response.body.tee();
+      trackChatCompletionsStream(
+        analyticsBranch,
+        auth.apiKey,
+        traceId,
+        provider.id,
+        agentName,
+        requestBody.model,
+        startTime
+      ).catch((error) => logger.warn({ error, traceId }, 'Failed to parse OpenAI streaming analytics'));
 
+      const upstreamHeaders = copyProxyResponseHeaders(response.headers);
+      upstreamHeaders.set('X-Trace-ID', traceId);
+      upstreamHeaders.set('X-Thread-ID', traceId);
+
+      const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+      const writer = writable.getWriter();
+      const reader = clientBranch.getReader();
+      const decoder = new TextDecoder();
+      const encoder = new TextEncoder();
+      const sseDecoder = new SseEventDecoder();
+      let signatureSent = false;
+
+      (async () => {
         try {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n').filter(line => line.trim().startsWith('data: '));
-            
-            for (const line of lines) {
-              const data = line.replace('data: ', '').trim();
+
+            const textChunk = decoder.decode(value, { stream: true });
+            const events = sseDecoder.push(textChunk);
+
+            for (const data of events) {
               if (data === '[DONE]') {
-                // Inject signature in the final chunk (or as a separate chunk before DONE)
                 if (!signatureSent) {
-                   const signatureChunk = {
-                     id: accumulatedState.id || "gen-signature",
-                     object: "chat.completion.chunk",
-                     created: Date.now(),
-                     model: requestBody.model,
-                     choices: [{
-                       index: 0,
-                       delta: { content: signature }, // Inject invisible signature
-                       finish_reason: null
-                     }]
-                   };
-                   await stream.write(`data: ${JSON.stringify(signatureChunk)}\n\n`);
-                   signatureSent = true;
+                  const signatureChunk = {
+                    id: 'gen-signature',
+                    object: 'chat.completion.chunk',
+                    created: Date.now(),
+                    model: requestBody.model,
+                    choices: [{
+                      index: 0,
+                      delta: { content: signature },
+                      finish_reason: null
+                    }]
+                  };
+
+                  await writer.write(encoder.encode(`data: ${JSON.stringify(signatureChunk)}\n\n`));
+                  signatureSent = true;
                 }
 
-                await stream.write(`data: [DONE]\n\n`);
+                await writer.write(encoder.encode('data: [DONE]\n\n'));
                 continue;
               }
-              try {
-                const parsed = JSON.parse(data);
-                accumulatedState = OpenAIParser.parseStreamChunk(parsed, accumulatedState);
-                await stream.write(`data: ${data}\n\n`);
-              } catch (e) { }
+
+              await writer.write(encoder.encode(`data: ${data}\n\n`));
             }
           }
 
-          // ... (Send Response Event logic) ...
-          sendToAnalyse(auth.apiKey, {
-            traceId: traceId!,
-            spanId: generateSpanId(),
-            eventType: 'llm_response',
-            providerId: provider.id,
-            entityName,
-            content: {
-              content: accumulatedState.content,
-              toolCalls: accumulatedState.toolCalls,
-              finishReason: accumulatedState.finishReason,
-            },
-            metadata: {
-              model: requestBody.model,
-              provider: 'openai',
-              usage: accumulatedState.usage,
-              latencyMs: Date.now() - startTime,
-            }
-          }).catch(err => logger.error({ err }, 'Failed to send response event'));
+          const finalEvents = sseDecoder.flush();
+          for (const data of finalEvents) {
+            if (data === '[DONE]') {
+              if (!signatureSent) {
+                const signatureChunk = {
+                  id: 'gen-signature',
+                  object: 'chat.completion.chunk',
+                  created: Date.now(),
+                  model: requestBody.model,
+                  choices: [{
+                    index: 0,
+                    delta: { content: signature },
+                    finish_reason: null
+                  }]
+                };
 
+                await writer.write(encoder.encode(`data: ${JSON.stringify(signatureChunk)}\n\n`));
+                signatureSent = true;
+              }
+
+              await writer.write(encoder.encode('data: [DONE]\n\n'));
+              continue;
+            }
+
+            await writer.write(encoder.encode(`data: ${data}\n\n`));
+          }
+        } catch (streamError) {
+          logger.warn({ streamError, traceId }, 'OpenAI stream forwarding interrupted');
         } finally {
           reader.releaseLock();
+          await writer.close();
         }
+      })();
+
+      return new Response(readable, {
+        status: response.status,
+        headers: upstreamHeaders,
       });
     } else {
       // Non-streaming logic
@@ -277,12 +394,12 @@ app.post('/chat/completions', async (c) => {
 
       if (!response.ok) {
         // ... error handling ...
-        sendToAnalyse(auth.apiKey, {
+        dispatchAnalyseEvent(auth.apiKey, {
           traceId,
           spanId: generateSpanId(),
           eventType: 'error',
           providerId: provider.id,
-          entityName,
+          agentName,
           content: responseData,
           metadata: { latencyMs }
         });
@@ -321,12 +438,12 @@ app.post('/chat/completions', async (c) => {
       }
 
       // 2. Send Response Event
-      sendToAnalyse(auth.apiKey, {
+      dispatchAnalyseEvent(auth.apiKey, {
         traceId,
         spanId: generateSpanId(),
         eventType: 'llm_response',
         providerId: provider.id,
-        entityName,
+        agentName,
         content: {
           content: parsedResponse.content,
           toolCalls: parsedResponse.toolCalls, // Ensure tool calls are passed
@@ -338,19 +455,19 @@ app.post('/chat/completions', async (c) => {
           usage: parsedResponse.usage,
           latencyMs,
         }
-      }).catch(err => logger.error({ err }, 'Failed to send response event'));
+      });
 
       return c.json(responseData);
     }
   } catch (error: any) {
     // ... error handling ...
     const latencyMs = Date.now() - startTime;
-    sendToAnalyse(auth.apiKey, {
+    dispatchAnalyseEvent(auth.apiKey, {
       traceId: traceId!,
       spanId: generateSpanId(),
       eventType: 'error',
       providerId: provider.id,
-      entityName,
+      agentName,
       content: { message: error.message },
       metadata: { latencyMs }
     });
@@ -367,19 +484,21 @@ app.post('/responses', async (c) => {
   const isStreaming = requestBody.stream === true;
 
   const startTime = Date.now();
-  const entityName = c.req.header('X-Entity-Name');
+  const agentName = c.req.header('X-Agent-Name');
 
-  const { providerSlug, actualModel } = parseModelField(requestBody.model);
+  if (!agentName) {
+    return c.json({ error: 'Missing required header: X-Agent-Name' }, 400);
+  }
 
-  // Get provider - either by slug or from API key's default
-  const { provider } = await getProviderBySlugOrDefault(
+  const { provider, isCustom, providerSlug, actualModel } = await resolveProviderFromModel(
     auth.userId,
-    providerSlug,
+    requestBody.model,
     auth.provider
   );
+  requestBody.model = actualModel;
   
   // 1. Try to find traceId from Headers
-  let traceId = c.req.header('X-Thread-ID');
+  let traceId = c.req.header('X-Trace-ID') || c.req.header('X-Thread-ID');
 
   // 2. If not found, try to extract hidden signature from the last assistant message in 'input'
   // The 'input' field in /responses can be a string (prompt) or an array (conversation history)
@@ -465,27 +584,28 @@ app.post('/responses', async (c) => {
   }, 'OpenAI Responses API request received');
   
   // Set Trace ID in Response Header for client awareness
+  c.header('X-Trace-ID', traceId);
   c.header('X-Thread-ID', traceId);
 
-  sendToAnalyse(auth.apiKey, {
+  dispatchAnalyseEvent(auth.apiKey, {
 
     traceId,
     spanId: requestSpanId,
     eventType: 'user_message',
     providerId: provider.id,
-    entityName,
+    agentName,
     content: requestBody.input || requestBody.conversation, // Log input
     metadata: {
       model: requestBody.model,
-      provider: 'openai',
+      provider: isCustom ? 'custom' : 'openai',
+      providerSlug: providerSlug || undefined,
       params: {
         temperature: requestBody.temperature,
       }
     }
-  }).catch(err => logger.error({ err }, 'Failed to send request event'));
+  });
 
   try {
-    const provider = auth.provider;
     const openaiUrl = `${provider.baseUrl}/responses`;
     const headers = {
       'Authorization': `Bearer ${provider.apiKey}`,
@@ -497,96 +617,51 @@ app.post('/responses', async (c) => {
     const signature = encodeSignature(traceId);
 
     if (isStreaming) {
-      return stream(c, async (stream) => {
-        const response = await fetch(openaiUrl, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(requestBody),
+      const response = await fetch(openaiUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        logger.error({ status: response.status, errorBody }, 'OpenAI API error');
+
+        dispatchAnalyseEvent(auth.apiKey, {
+          traceId,
+          spanId: generateSpanId(),
+          eventType: 'error',
+          providerId: provider.id,
+          agentName,
+          content: { error: errorBody, status: response.status },
+          metadata: { latencyMs: Date.now() - startTime }
         });
 
-        if (!response.ok) {
-          const error = await response.text();
-          logger.error({ status: response.status, error }, 'OpenAI API error');
-          
-          sendToAnalyse(auth.apiKey, {
-            traceId: traceId!,
-            spanId: generateSpanId(),
-            eventType: 'error',
-            providerId: provider.id,
-            entityName,
-            content: { error, status: response.status },
-            metadata: { latencyMs: Date.now() - startTime }
-          });
-          
-          await stream.write(JSON.stringify({ error: 'Provider API error', details: error }));
-          return;
-        }
+        return responseFromUpstreamError(response.status, response.headers.get('content-type'), errorBody);
+      }
 
-        // Pass-through streaming with background logging
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error('No response body');
+      if (!response.body) {
+        throw new Error('No response body');
+      }
 
-        // Async logging without blocking stream
-        (async () => {
-             const decoder = new TextDecoder();
-             let accumulatedState = OpenAIParser.getInitialStreamState();
-             // We need a separate reader or clone? 
-             // Response body reader can only be read once.
-             // We are reading it in the loop below.
-             // We must hook into the loop below.
-        })();
+      const [clientBranch, analyticsBranch] = response.body.tee();
+      trackResponsesStream(
+        analyticsBranch,
+        auth.apiKey,
+        traceId,
+        provider.id,
+        agentName,
+        requestBody.model,
+        startTime
+      ).catch((error) => logger.warn({ error, traceId }, 'Failed to parse OpenAI /responses streaming analytics'));
 
-        const decoder = new TextDecoder();
-        let accumulatedState = OpenAIParser.getInitialStreamState();
+      const upstreamHeaders = copyProxyResponseHeaders(response.headers);
+      upstreamHeaders.set('X-Trace-ID', traceId);
+      upstreamHeaders.set('X-Thread-ID', traceId);
 
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            
-            // 1. Write to client immediately (Low Latency)
-            await stream.write(value);
-
-            // 2. Accumulate for analytics
-            try {
-                const chunkStr = decoder.decode(value, { stream: true });
-                const lines = chunkStr.split('\n').filter(line => line.trim().startsWith('data: '));
-                for (const line of lines) {
-                    const data = line.replace('data: ', '').trim();
-                    if (data === '[DONE]') continue;
-                    try {
-                        const parsed = JSON.parse(data);
-                        accumulatedState = OpenAIParser.parseResponsesStreamChunk(parsed, accumulatedState);
-                    } catch (e) {}
-                }
-            } catch (e) {
-                // Ignore parsing errors during streaming to avoid disruption
-            }
-          }
-          
-           // Send Response Event after stream ends
-           sendToAnalyse(auth.apiKey, {
-            traceId: traceId!,
-            spanId: generateSpanId(),
-            eventType: 'llm_response',
-            providerId: provider.id,
-            entityName,
-            content: {
-              content: accumulatedState.content,
-              // toolCalls: accumulatedState.toolCalls, // Tool calls in streaming /responses tricky to capture perfectly yet
-              finishReason: accumulatedState.finishReason || 'stop',
-            },
-            metadata: {
-              model: requestBody.model,
-              provider: 'openai',
-              usage: accumulatedState.usage,
-              latencyMs: Date.now() - startTime,
-            }
-          }).catch(err => logger.error({ err }, 'Failed to send response event'));
-
-        } finally {
-          reader.releaseLock();
-        }
+      return new Response(clientBranch, {
+        status: response.status,
+        headers: upstreamHeaders,
       });
     } else {
       // Non-streaming logic
@@ -601,12 +676,12 @@ app.post('/responses', async (c) => {
       const responseData = await response.json() as any;
 
       if (!response.ok) {
-        sendToAnalyse(auth.apiKey, {
+        dispatchAnalyseEvent(auth.apiKey, {
           traceId,
           spanId: generateSpanId(),
           eventType: 'error',
           providerId: provider.id,
-          entityName,
+          agentName,
           content: responseData,
           metadata: { latencyMs }
         });
@@ -669,12 +744,12 @@ app.post('/responses', async (c) => {
       }
 
       // 2. Send Response Event
-      sendToAnalyse(auth.apiKey, {
+      dispatchAnalyseEvent(auth.apiKey, {
         traceId,
         spanId: generateSpanId(),
         eventType: 'llm_response',
         providerId: provider.id,
-        entityName,
+        agentName,
         content: {
           content: parsedResponse.content,
           finishReason: parsedResponse.finishReason,
@@ -685,18 +760,18 @@ app.post('/responses', async (c) => {
           usage: parsedResponse.usage,
           latencyMs,
         }
-      }).catch(err => logger.error({ err }, 'Failed to send response event'));
+      });
 
       return c.json(responseData);
     }
   } catch (error: any) {
     const latencyMs = Date.now() - startTime;
-    sendToAnalyse(auth.apiKey, {
+    dispatchAnalyseEvent(auth.apiKey, {
       traceId: traceId!,
       spanId: generateSpanId(),
       eventType: 'error',
       providerId: provider.id,
-      entityName,
+      agentName,
       content: { message: error.message },
       metadata: { latencyMs }
     });

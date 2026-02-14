@@ -1,72 +1,117 @@
 import env from '@whyops/shared/env';
 import { createServiceLogger } from '@whyops/shared/logger';
 import { generateSpanId, generateThreadId } from '@whyops/shared/utils';
-import { Provider } from '@whyops/shared/models';
-import { decrypt } from '@whyops/shared/utils';
 import { Hono } from 'hono';
-import { stream } from 'hono/streaming';
-import { sendToAnalyse } from '../services/analyse';
+import { dispatchAnalyseEvent } from '../services/async-events';
+import { copyProxyResponseHeaders, resolveProviderFromModel } from '../services/proxy-routing';
+import { SseEventDecoder } from '../services/sse';
 
 const logger = createServiceLogger('proxy:anthropic');
 const app = new Hono();
 
-/**
- * Parse model field to extract provider slug and actual model name
- * Format: "provider-slug/model-name" or just "model-name"
- * Returns: { providerSlug: string | null, actualModel: string }
- */
-function parseModelField(model: string): { providerSlug: string | null; actualModel: string } {
-  if (!model || !model.includes('/')) {
-    return { providerSlug: null, actualModel: model };
+function responseFromUpstreamError(status: number, contentType: string | null, body: string): Response {
+  const headers = new Headers();
+  if (contentType) {
+    headers.set('content-type', contentType);
   }
-
-  const parts = model.split('/');
-  // If it looks like a slug (contains dash), treat first part as slug
-  if (parts[0].includes('-')) {
-    return { providerSlug: parts[0], actualModel: parts.slice(1).join('/') };
-  }
-
-  // Otherwise, treat as just model name
-  return { providerSlug: null, actualModel: model };
+  return new Response(body, { status, headers });
 }
 
-/**
- * Get provider by slug or return default from auth context
- */
-async function getProviderBySlugOrDefault(
-  userId: string,
-  providerSlug: string | null,
-  defaultProvider: any
-): Promise<{ provider: any; isCustom: boolean }> {
-  // If no slug provided, use default provider from API key
-  if (!providerSlug) {
-    return { provider: defaultProvider, isCustom: false };
-  }
+async function trackAnthropicStream(
+  streamBody: ReadableStream<Uint8Array>,
+  apiKey: string,
+  traceId: string,
+  spanId: string,
+  providerId: string | undefined,
+  agentName: string,
+  model: string,
+  requestBody: any,
+  startTime: number
+): Promise<void> {
+  const reader = streamBody.getReader();
+  const decoder = new TextDecoder();
+  const sseDecoder = new SseEventDecoder();
+  const accumulatedResponse: any = {
+    id: '',
+    type: 'message',
+    role: 'assistant',
+    content: [{ type: 'text', text: '' }],
+    model,
+    stop_reason: null,
+    usage: { input_tokens: 0, output_tokens: 0 },
+  };
 
-  // Try to find provider by slug
-  const provider = await Provider.findOne({
-    where: {
-      userId,
-      slug: providerSlug,
-      isActive: true,
-    },
-  });
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-  if (provider) {
-    // Decrypt the API key
-    const decryptedApiKey = decrypt(provider.apiKey);
-    return {
-      provider: {
-        ...provider.toJSON(),
-        apiKey: decryptedApiKey,
+      const textChunk = decoder.decode(value, { stream: true });
+      const events = sseDecoder.push(textChunk);
+
+      for (const data of events) {
+        try {
+          const parsed = JSON.parse(data);
+
+          if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+            accumulatedResponse.content[0].text += parsed.delta.text;
+          }
+          if (parsed.type === 'message_delta' && parsed.delta?.stop_reason) {
+            accumulatedResponse.stop_reason = parsed.delta.stop_reason;
+          }
+          if (parsed.type === 'message_start' && parsed.message) {
+            accumulatedResponse.id = parsed.message.id;
+            accumulatedResponse.usage = parsed.message.usage;
+          }
+          if (parsed.type === 'message_stop' && parsed.usage) {
+            accumulatedResponse.usage = parsed.usage;
+          }
+        } catch {
+          // Ignore malformed chunks for analytics only path
+        }
+      }
+    }
+
+    const finalEvents = sseDecoder.flush();
+    for (const data of finalEvents) {
+      try {
+        const parsed = JSON.parse(data);
+        if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+          accumulatedResponse.content[0].text += parsed.delta.text;
+        }
+      } catch {
+        // Ignore malformed chunks for analytics only path
+      }
+    }
+
+    const latencyMs = Date.now() - startTime;
+    dispatchAnalyseEvent(apiKey, {
+      eventType: 'llm_response',
+      traceId,
+      spanId,
+      providerId,
+      agentName,
+      content: {
+        content: accumulatedResponse.content[0].text,
+        finishReason: accumulatedResponse.stop_reason,
       },
-      isCustom: true,
-    };
+      metadata: {
+        provider: 'anthropic',
+        model,
+        systemPrompt: requestBody.system,
+        temperature: requestBody.temperature,
+        maxTokens: requestBody.max_tokens,
+        usage: accumulatedResponse.usage ? {
+          promptTokens: accumulatedResponse.usage.input_tokens,
+          completionTokens: accumulatedResponse.usage.output_tokens,
+          totalTokens: accumulatedResponse.usage.input_tokens + accumulatedResponse.usage.output_tokens,
+        } : undefined,
+        latencyMs,
+      }
+    });
+  } finally {
+    reader.releaseLock();
   }
-
-  // Fall back to default provider if slug not found
-  logger.warn({ providerSlug }, 'Provider slug not found, using default');
-  return { provider: defaultProvider, isCustom: false };
 }
 
 // Anthropic Messages endpoint
@@ -76,22 +121,22 @@ app.post('/messages', async (c) => {
   const isStreaming = requestBody.stream === true;
 
   const startTime = Date.now();
-  const entityName = c.req.header('X-Entity-Name');
+  const agentName = c.req.header('X-Agent-Name');
 
-  // Parse provider slug from model field (format: provider-slug/model or just model)
-  const { providerSlug, actualModel } = parseModelField(requestBody.model);
+  if (!agentName) {
+    return c.json({ error: 'Missing required header: X-Agent-Name' }, 400);
+  }
 
-  // Get provider - either by slug or from API key's default
-  const { provider, isCustom } = await getProviderBySlugOrDefault(
+  const { provider, isCustom, providerSlug, actualModel } = await resolveProviderFromModel(
     auth.userId,
-    providerSlug,
+    requestBody.model,
     auth.provider
   );
 
   // Use actual model for the API call
   requestBody.model = actualModel;
 
-  const threadId = c.req.header('X-Thread-ID') || generateThreadId();
+  const traceId = c.req.header('X-Trace-ID') || c.req.header('X-Thread-ID') || generateThreadId();
   const spanId = generateSpanId();
 
   logger.info({
@@ -99,7 +144,7 @@ app.post('/messages', async (c) => {
     providerSlug,
     isCustom,
     stream: isStreaming,
-    threadId,
+    traceId,
   }, 'Anthropic request received');
 
   try {
@@ -112,125 +157,75 @@ app.post('/messages', async (c) => {
       'User-Agent': 'WhyOps-Proxy/1.0',
     };
 
+    dispatchAnalyseEvent(auth.apiKey, {
+      eventType: 'user_message',
+      traceId,
+      spanId,
+      providerId: provider?.id,
+      agentName,
+      content: requestBody.messages,
+      metadata: {
+        provider: isCustom ? 'custom' : 'anthropic',
+        providerSlug: providerSlug || undefined,
+        model: requestBody.model,
+        systemPrompt: requestBody.system,
+        temperature: requestBody.temperature,
+        maxTokens: requestBody.max_tokens,
+      }
+    });
+
     if (isStreaming) {
-      // Handle streaming response
-      return stream(c, async (stream) => {
-        const response = await fetch(anthropicUrl, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(requestBody),
+      const response = await fetch(anthropicUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        logger.error({ status: response.status, errorBody }, 'Anthropic API error');
+
+        dispatchAnalyseEvent(auth.apiKey, {
+          eventType: 'error',
+          traceId,
+          spanId: generateSpanId(),
+          providerId: provider?.id,
+          agentName,
+          content: { error: errorBody, status: response.status },
+          metadata: {
+            provider: 'anthropic',
+            model: requestBody.model,
+            latencyMs: Date.now() - startTime,
+          },
         });
 
-        if (!response.ok) {
-          const error = await response.text();
-          logger.error({ status: response.status, error }, 'Anthropic API error');
-          
-          // Send error to analyse service (non-blocking)
-          sendToAnalyse(auth.apiKey, {
-            eventType: 'llm_response',
-            threadId,
-            spanId,
-            providerId: provider?.id,
-            entityName,
-            provider: 'anthropic',
-            model: requestBody.model,
-            messages: requestBody.messages,
-            error: error,
-            latencyMs: Date.now() - startTime,
-          }).catch(err => logger.error({ err }, 'Failed to send error to analyse'));
-          
-          await stream.write(JSON.stringify({ error: 'Provider API error', details: error }));
-          return;
-        }
+        return responseFromUpstreamError(response.status, response.headers.get('content-type'), errorBody);
+      }
 
-        // Collect chunks for logging
-        const chunks: any[] = [];
-        let accumulatedResponse: any = {
-          id: '',
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'text', text: '' }],
-          model: requestBody.model,
-          stop_reason: null,
-          usage: { input_tokens: 0, output_tokens: 0 },
-        };
+      if (!response.body) {
+        throw new Error('No response body');
+      }
 
-        const reader = response.body?.getReader();
-        const decoder = new TextDecoder();
+      const [clientBranch, analyticsBranch] = response.body.tee();
+      trackAnthropicStream(
+        analyticsBranch,
+        auth.apiKey,
+        traceId,
+        spanId,
+        provider?.id,
+        agentName,
+        requestBody.model,
+        requestBody,
+        startTime
+      ).catch((error) => logger.warn({ error, traceId }, 'Failed to parse Anthropic streaming analytics'));
 
-        if (!reader) {
-          throw new Error('No response body');
-        }
+      const upstreamHeaders = copyProxyResponseHeaders(response.headers);
+      upstreamHeaders.set('X-Trace-ID', traceId);
+      upstreamHeaders.set('X-Thread-ID', traceId);
 
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value, { stream: true });
-            
-            // Parse SSE format
-            const lines = chunk.split('\n').filter(line => line.trim().startsWith('data: '));
-            
-            for (const line of lines) {
-              const data = line.replace('data: ', '').trim();
-
-              try {
-                const parsed = JSON.parse(data);
-                chunks.push(parsed);
-                
-                // Accumulate content based on event type
-                if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-                  accumulatedResponse.content[0].text += parsed.delta.text;
-                }
-                if (parsed.type === 'message_delta' && parsed.delta?.stop_reason) {
-                  accumulatedResponse.stop_reason = parsed.delta.stop_reason;
-                }
-                if (parsed.type === 'message_start' && parsed.message) {
-                  accumulatedResponse.id = parsed.message.id;
-                  accumulatedResponse.usage = parsed.message.usage;
-                }
-                
-                // Forward to client
-                await stream.write(`data: ${data}\n\n`);
-              } catch (e) {
-                // Skip invalid JSON
-                logger.warn({ line }, 'Failed to parse SSE chunk');
-              }
-            }
-          }
-
-          // Send to analyse service (non-blocking)
-          const latencyMs = Date.now() - startTime;
-          sendToAnalyse(auth.apiKey, {
-            eventType: 'llm_response',
-            threadId,
-            spanId,
-            providerId: provider?.id,
-            entityName,
-            provider: 'anthropic',
-            model: requestBody.model,
-            systemPrompt: requestBody.system,
-            messages: requestBody.messages,
-            temperature: requestBody.temperature,
-            maxTokens: requestBody.max_tokens,
-            response: {
-              content: accumulatedResponse.content[0].text,
-              finishReason: accumulatedResponse.stop_reason,
-            },
-            usage: accumulatedResponse.usage ? {
-              promptTokens: accumulatedResponse.usage.input_tokens,
-              completionTokens: accumulatedResponse.usage.output_tokens,
-              totalTokens: accumulatedResponse.usage.input_tokens + accumulatedResponse.usage.output_tokens,
-            } : undefined,
-            latencyMs,
-          }).catch(err => logger.error({ err }, 'Failed to send to analyse'));
-
-          logger.info({ threadId, latencyMs, chunksCount: chunks.length }, 'Streaming completed');
-          
-        } finally {
-          reader.releaseLock();
-        }
+      return new Response(clientBranch, {
+        status: response.status,
+        headers: upstreamHeaders,
       });
     } else {
       // Handle non-streaming response
@@ -252,70 +247,70 @@ app.post('/messages', async (c) => {
       if (!response.ok) {
         logger.error({ status: response.status, responseData }, 'Anthropic API error');
         
-        // Send error to analyse service (non-blocking)
-        sendToAnalyse(auth.apiKey, {
-          eventType: 'llm_response',
-          threadId,
-          spanId,
+        dispatchAnalyseEvent(auth.apiKey, {
+          eventType: 'error',
+          traceId,
+          spanId: generateSpanId(),
           providerId: provider?.id,
-          entityName,
-          provider: 'anthropic',
-          model: requestBody.model,
-          messages: requestBody.messages,
-          error: JSON.stringify(responseData),
-          latencyMs,
-        }).catch(err => logger.error({ err }, 'Failed to send error to analyse'));
+          agentName,
+          content: responseData,
+          metadata: {
+            provider: 'anthropic',
+            model: requestBody.model,
+            latencyMs,
+          },
+        });
         
         return c.json(responseData, response.status as any);
       }
 
-      // Send to analyse service (non-blocking)
-      sendToAnalyse(auth.apiKey, {
+      dispatchAnalyseEvent(auth.apiKey, {
         eventType: 'llm_response',
-        threadId,
+        traceId,
         spanId,
         providerId: provider?.id,
-        entityName,
-        provider: 'anthropic',
-        model: requestBody.model,
-        systemPrompt: requestBody.system,
-        messages: requestBody.messages,
-        temperature: requestBody.temperature,
-        maxTokens: requestBody.max_tokens,
-        response: {
+        agentName,
+        content: {
           content: responseData.content?.[0]?.text,
           finishReason: responseData.stop_reason,
         },
-        usage: responseData.usage ? {
-          promptTokens: responseData.usage.input_tokens,
-          completionTokens: responseData.usage.output_tokens,
-          totalTokens: responseData.usage.input_tokens + responseData.usage.output_tokens,
-        } : undefined,
-        latencyMs,
-      }).catch(err => logger.error({ err }, 'Failed to send to analyse'));
+        metadata: {
+          provider: 'anthropic',
+          model: requestBody.model,
+          systemPrompt: requestBody.system,
+          temperature: requestBody.temperature,
+          maxTokens: requestBody.max_tokens,
+          usage: responseData.usage ? {
+            promptTokens: responseData.usage.input_tokens,
+            completionTokens: responseData.usage.output_tokens,
+            totalTokens: responseData.usage.input_tokens + responseData.usage.output_tokens,
+          } : undefined,
+          latencyMs,
+        },
+      });
 
-      logger.info({ threadId, latencyMs, model: requestBody.model }, 'Request completed');
+      logger.info({ traceId, latencyMs, model: requestBody.model }, 'Request completed');
 
       // Return response to client
       return c.json(responseData);
     }
   } catch (error: any) {
     const latencyMs = Date.now() - startTime;
-    logger.error({ error, threadId }, 'Request failed');
+    logger.error({ error, traceId }, 'Request failed');
 
-    // Send error to analyse service (non-blocking)
-    sendToAnalyse(auth.apiKey, {
-      eventType: 'llm_response',
-      threadId,
-      spanId,
+    dispatchAnalyseEvent(auth.apiKey, {
+      eventType: 'error',
+      traceId,
+      spanId: generateSpanId(),
       providerId: provider?.id,
-      entityName,
-      provider: 'anthropic',
-      model: requestBody.model,
-      messages: requestBody.messages,
-      error: error.message,
-      latencyMs,
-    }).catch(err => logger.error({ err }, 'Failed to send error to analyse'));
+      agentName,
+      content: { message: error.message },
+      metadata: {
+        provider: 'anthropic',
+        model: requestBody.model,
+        latencyMs,
+      },
+    });
 
     return c.json({ error: error.message }, 500);
   }

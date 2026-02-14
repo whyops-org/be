@@ -5,16 +5,16 @@ const logger = createServiceLogger('proxy:analyse');
 
 type EventType = 'user_message' | 'llm_response' | 'tool_call' | 'tool_call_request' | 'tool_call_response' | 'error';
 
-interface TraceEventPayload {
+export interface TraceEventPayload {
   // Required fields
   eventType: EventType;
   // Optional common fields
   traceId?: string;
-  threadId?: string; // Legacy - maps to traceId
   spanId?: string;
   stepId?: number;
   parentStepId?: number;
   providerId?: string;
+  agentName?: string;
   entityName?: string;
   timestamp?: string;
   content?: unknown;
@@ -34,12 +34,6 @@ export async function sendToAnalyse(
   try {
     const analyseUrl = `${env.ANALYSE_URL}/api/events`;
 
-    // Normalize threadId to traceId
-    const normalizedPayload = {
-      ...payload,
-      traceId: payload.traceId || payload.threadId,
-    };
-
     // Fire-and-forget request - only forward API key
     fetch(analyseUrl, {
       method: 'POST',
@@ -48,18 +42,18 @@ export async function sendToAnalyse(
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        ...normalizedPayload,
-        timestamp: normalizedPayload.timestamp || new Date().toISOString(),
+        ...payload,
+        timestamp: payload.timestamp || new Date().toISOString(),
       }),
       // Use keepalive to allow request to continue even if response is not read
       // @ts-ignore - keepalive is valid but not in TypeScript types yet
       keepalive: true,
     }).catch((error) => {
       // Log error but don't throw - this is non-blocking
-      logger.error({ error, traceId: normalizedPayload.traceId }, 'Failed to send to analyse service');
+      logger.error({ error, traceId: payload.traceId }, 'Failed to send to analyse service');
     });
 
-    logger.debug({ traceId: normalizedPayload.traceId, eventType: normalizedPayload.eventType }, 'Event sent to analyse service');
+    logger.debug({ traceId: payload.traceId, eventType: payload.eventType }, 'Event sent to analyse service');
   } catch (error) {
     // Never throw errors - this is non-blocking
     logger.error({ error }, 'Error in sendToAnalyse');

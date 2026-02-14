@@ -12,15 +12,35 @@ export class EventController {
     // Get data from parsed body (set by route after header merging)
     const data = (c.req as any).parsedData || await c.req.json();
 
+    const ensureRequiredContext = (item: any) => {
+      if (!item.userId || !item.projectId || !item.environmentId) {
+        throw new Error('MISSING_AUTH_CONTEXT');
+      }
+    };
+
     try {
       if (Array.isArray(data)) {
+        data.forEach(ensureRequiredContext);
         const results = await EventService.processBatchEvents(data);
         return c.json(results, 201);
       } else {
+        ensureRequiredContext(data);
         const result = await EventService.processEvent(data as EventData);
         return c.json(result, 201);
       }
     } catch (error: any) {
+      if (error?.message === 'MISSING_AUTH_CONTEXT') {
+        return c.json({ error: 'Missing auth context. Provide API key or X-User-Id, X-Project-Id, X-Environment-Id headers.' }, 400);
+      }
+
+      if (error?.message === 'TRACE_AGENT_CONFLICT') {
+        return c.json({ error: 'Trace is already bound to a different agent/version for this traceId' }, 409);
+      }
+
+      if (typeof error?.message === 'string' && error.message.includes('not initialized')) {
+        return c.json({ error: error.message }, 400);
+      }
+
       logger.error({ error, data }, 'Failed to save event(s)');
       return c.json({ error: 'Failed to save event(s)' }, 500);
     }

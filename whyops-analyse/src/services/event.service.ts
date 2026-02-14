@@ -11,6 +11,7 @@ const logger = createServiceLogger('analyse:event-service');
 export interface EventData {
   eventType: 'user_message' | 'llm_response' | 'tool_call' | 'tool_call_request' | 'tool_call_response' | 'error';
   traceId: string;
+  agentName: string;
   spanId?: string;
   stepId?: number;
   parentStepId?: number;
@@ -18,7 +19,6 @@ export interface EventData {
   projectId: string;
   environmentId: string;
   providerId?: string;
-  entityName?: string;
   timestamp?: string;
   content?: any;
   metadata?: Record<string, any>;
@@ -56,7 +56,7 @@ export class EventService {
         projectId: data.projectId,
         environmentId: data.environmentId,
         providerId: data.providerId,
-        entityName: data.entityName,
+        agentName: data.agentName,
         content: data.content,
         metadata: data.metadata,
         timestamp: data.timestamp,
@@ -73,7 +73,8 @@ export class EventService {
 
       const samplingResult = await SamplingService.shouldSampleEvent(
         data.userId,
-        data.entityName,
+        data.environmentId,
+        data.agentName,
         eventHash
       );
 

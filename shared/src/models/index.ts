@@ -1,3 +1,4 @@
+import Agent from './Agent';
 import ApiKey from './ApiKey';
 import Entity from './Entity';
 import { Environment } from './Environment';
@@ -62,23 +63,36 @@ LLMEvent.belongsTo(Trace, { foreignKey: 'traceId', targetKey: 'id', as: 'trace' 
 User.hasMany(Entity, { foreignKey: 'userId', as: 'entities' });
 Entity.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 
+User.hasMany(Agent, { foreignKey: 'userId', as: 'agents' });
+Agent.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
 // Project -> Entity
 Project.hasMany(Entity, { foreignKey: 'projectId', as: 'entities' });
 Entity.belongsTo(Project, { foreignKey: 'projectId', as: 'project' });
 
+Project.hasMany(Agent, { foreignKey: 'projectId', as: 'agents' });
+Agent.belongsTo(Project, { foreignKey: 'projectId', as: 'project' });
+
 // Environment -> Entity
 Environment.hasMany(Entity, { foreignKey: 'environmentId', as: 'entities' });
 Entity.belongsTo(Environment, { foreignKey: 'environmentId', as: 'environment' });
+
+Environment.hasMany(Agent, { foreignKey: 'environmentId', as: 'agents' });
+Agent.belongsTo(Environment, { foreignKey: 'environmentId', as: 'environment' });
+
+Agent.hasMany(Entity, { foreignKey: 'agentId', as: 'versions' });
+Entity.belongsTo(Agent, { foreignKey: 'agentId', as: 'agent' });
 
 LLMEvent.belongsTo(Entity, { foreignKey: 'entityId', as: 'entity' });
 
 Trace.belongsTo(Entity, { foreignKey: 'entityId', as: 'entity' });
 Entity.hasMany(Trace, { foreignKey: 'entityId', as: 'traces' });
 
-export { ApiKey, Entity, Environment, LlmCost, LLMEvent, Project, Provider, RequestLog, Trace, User };
+export { Agent, ApiKey, Entity, Environment, LlmCost, LLMEvent, Project, Provider, RequestLog, Trace, User };
 
 export const models = {
   User,
+  Agent,
   Provider,
   ApiKey,
   LLMEvent,

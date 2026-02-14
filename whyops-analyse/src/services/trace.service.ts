@@ -11,7 +11,7 @@ export interface TraceCreationData {
   projectId: string;
   environmentId: string;
   providerId?: string;
-  entityName?: string;
+  agentName: string;
   content?: any;
   metadata?: Record<string, any>;
   timestamp?: string;
@@ -23,72 +23,74 @@ export class TraceService {
    * Resolves entity and extracts metadata on first creation
    */
   static async ensureTraceExists(data: TraceCreationData): Promise<Trace | null> {
-    try {
-      // 1. Check if trace exists first (fast path)
-      let trace = await Trace.findByPk(data.traceId);
-      if (trace) {
-        // Trace already exists, locked to an Entity Version
-        return trace;
-      }
+    // 1. Resolve agent version by name (must be initialized already)
+    const resolvedAgentVersion = await EntityService.resolveLatestAgentVersionByName(
+      data.userId,
+      data.projectId,
+      data.environmentId,
+      data.agentName
+    );
 
-      // 2. Resolve Entity ID (if name provided)
-      // This will create the entity if it doesn't exist within the specified environment
-      let resolvedEntityId: string | undefined;
-      if (data.entityName) {
-        resolvedEntityId = await EntityService.resolveEntityId(
-          data.userId,
-          data.projectId,
-          data.environmentId,
-          data.entityName,
-          data.metadata // Pass metadata to create/version the entity
-        );
-      }
-
-      // 3. Resolve Provider Type to select parser (if providerId is provided)
-      let providerType = 'openai'; // default
-      if (data.providerId) {
-        try {
-          const provider = await Provider.findByPk(data.providerId);
-          if (provider) providerType = provider.type;
-        } catch (e) {
-          logger.warn(
-            { providerId: data.providerId },
-            'Failed to fetch provider type for trace init, using default'
-          );
-        }
-      }
-
-      // 4. Extract Metadata using Strategy Pattern
-      const parser = ParserFactory.getParser(providerType);
-      const metadata = parser.extract(data.content, data.metadata);
-
-      // 5. Create Trace (using findOrCreate for safety)
-      const [newTrace, created] = await Trace.findOrCreate({
-        where: { id: data.traceId },
-        defaults: {
-          id: data.traceId,
-          userId: data.userId,
-          providerId: data.providerId,
-          entityId: resolvedEntityId,
-          model: metadata.model,
-          systemMessage: metadata.systemMessage,
-          tools: metadata.tools,
-          metadata: data.metadata,
-          createdAt: data.timestamp ? new Date(data.timestamp) : new Date(),
-        },
-      });
-
-      if (created) {
-        logger.info(
-          { traceId: newTrace.id, providerType, entityId: resolvedEntityId },
-          'Trace initialized'
-        );
-      }
-
-      return newTrace;
-    } catch (error) {
-      logger.error({ error, traceId: data.traceId }, 'Failed to ensure trace existence');
-      return null;
+    if (!resolvedAgentVersion) {
+      throw new Error(`Agent '${data.agentName}' is not initialized`);
     }
+
+    // 2. Check if trace exists first (fast path)
+    let trace = await Trace.findByPk(data.traceId);
+    if (trace) {
+      if (trace.entityId && trace.entityId !== resolvedAgentVersion.agentVersionId) {
+        throw new Error('TRACE_AGENT_CONFLICT');
+      }
+
+      if (!trace.entityId) {
+        trace.entityId = resolvedAgentVersion.agentVersionId;
+        await trace.save();
+      }
+
+      return trace;
+    }
+
+    // 3. Resolve Provider Type to select parser (if providerId is provided)
+    let providerType = 'openai'; // default
+    if (data.providerId) {
+      try {
+        const provider = await Provider.findByPk(data.providerId);
+        if (provider) providerType = provider.type;
+      } catch (e) {
+        logger.warn(
+          { providerId: data.providerId },
+          'Failed to fetch provider type for trace init, using default'
+        );
+      }
+    }
+
+    // 4. Extract Metadata using Strategy Pattern
+    const parser = ParserFactory.getParser(providerType);
+    const metadata = parser.extract(data.content, data.metadata);
+
+    // 5. Create Trace (using findOrCreate for safety)
+    const [newTrace, created] = await Trace.findOrCreate({
+      where: { id: data.traceId },
+      defaults: {
+        id: data.traceId,
+        userId: data.userId,
+        providerId: data.providerId,
+        entityId: resolvedAgentVersion.agentVersionId,
+        model: metadata.model,
+        systemMessage: metadata.systemMessage,
+        tools: metadata.tools,
+        metadata: data.metadata,
+        createdAt: data.timestamp ? new Date(data.timestamp) : new Date(),
+      },
+    });
+
+    if (created) {
+      logger.info(
+        { traceId: newTrace.id, providerType, entityId: resolvedAgentVersion.agentVersionId },
+        'Trace initialized'
+      );
+    }
+
+    return newTrace;
   }
 }
