@@ -1,3 +1,4 @@
+import { getWhyopsCorsOptions } from '@whyops/shared/cors';
 import env from '@whyops/shared/env';
 import { createServiceLogger } from '@whyops/shared/logger';
 import { Hono } from 'hono';
@@ -17,7 +18,7 @@ const app = new Hono();
 
 // Global middleware
 app.use('*', honoLogger());
-app.use('*', cors());
+app.use('*', cors(getWhyopsCorsOptions()));
 app.use('*', requestLogMiddleware);
 
 // Health check (no auth required)

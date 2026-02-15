@@ -10,15 +10,29 @@ export class ThreadController {
    */
   static async listThreads(c: Context) {
     try {
-      const userId = c.req.query('userId');
-      const limit = parseInt(c.req.query('limit') || '50');
-      const offset = parseInt(c.req.query('offset') || '0');
+      const auth = c.get('analyseAuth');
+      if (!auth) {
+        return c.json({ success: false, error: 'Unauthorized: authentication required' }, 401);
+      }
 
-      const result = await ThreadService.listThreads({ userId, limit, offset });
-      return c.json(result);
+      const count = Math.min(Math.max(parseInt(c.req.query('count') || '20', 10) || 20, 1), 100);
+      const page = Math.max(parseInt(c.req.query('page') || '1', 10) || 1, 1);
+      const agentName = c.req.query('agentName')?.trim() || undefined;
+
+      const result = await ThreadService.listThreads({
+        userId: auth.userId,
+        agentName,
+        page,
+        count,
+      });
+
+      return c.json({
+        success: true,
+        ...result,
+      });
     } catch (error: any) {
       logger.error({ error }, 'Failed to list threads');
-      return c.json({ error: 'Failed to list threads' }, 500);
+      return c.json({ success: false, error: 'Failed to list threads' }, 500);
     }
   }
 
@@ -27,17 +41,25 @@ export class ThreadController {
    */
   static async getThreadDetail(c: Context) {
     try {
-      const threadId = c.req.param('threadId');
-      const thread = await ThreadService.getThreadDetail(threadId);
-
-      if (!thread) {
-        return c.json({ error: 'Thread not found' }, 404);
+      const auth = c.get('analyseAuth');
+      if (!auth) {
+        return c.json({ success: false, error: 'Unauthorized: authentication required' }, 401);
       }
 
-      return c.json(thread);
+      const threadId = c.req.param('threadId');
+      const thread = await ThreadService.getThreadDetail(threadId, auth.userId);
+
+      if (!thread) {
+        return c.json({ success: false, error: 'Thread not found' }, 404);
+      }
+
+      return c.json({
+        success: true,
+        ...thread,
+      });
     } catch (error: any) {
       logger.error({ error }, 'Failed to get thread detail');
-      return c.json({ error: 'Failed to get thread detail' }, 500);
+      return c.json({ success: false, error: 'Failed to get thread detail' }, 500);
     }
   }
 

@@ -44,6 +44,27 @@ export class TraceService {
 
       if (!trace.entityId) {
         trace.entityId = resolvedAgentVersion.agentVersionId;
+      }
+
+      if (!trace.providerId && data.providerId) {
+        trace.providerId = data.providerId;
+      }
+
+      const fallbackMetadata = this.extractBestEffortMetadata(data.content, data.metadata);
+
+      if (!trace.model && fallbackMetadata.model) {
+        trace.model = fallbackMetadata.model;
+      }
+
+      if (!trace.systemMessage && fallbackMetadata.systemMessage) {
+        trace.systemMessage = fallbackMetadata.systemMessage;
+      }
+
+      if (!trace.tools && fallbackMetadata.tools) {
+        trace.tools = fallbackMetadata.tools;
+      }
+
+      if (trace.changed()) {
         await trace.save();
       }
 
@@ -92,5 +113,16 @@ export class TraceService {
     }
 
     return newTrace;
+  }
+
+  private static extractBestEffortMetadata(content?: any, metadata?: Record<string, any>) {
+    const openai = ParserFactory.getParser('openai').extract(content, metadata);
+    const anthropic = ParserFactory.getParser('anthropic').extract(content, metadata);
+
+    return {
+      model: openai.model || anthropic.model,
+      systemMessage: openai.systemMessage || anthropic.systemMessage,
+      tools: openai.tools || anthropic.tools,
+    };
   }
 }

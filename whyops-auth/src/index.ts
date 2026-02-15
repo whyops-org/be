@@ -1,3 +1,4 @@
+import { getWhyopsCorsOptions } from '@whyops/shared/cors';
 import { initDatabase } from '@whyops/shared/database';
 import env from '@whyops/shared/env';
 import { createServiceLogger } from '@whyops/shared/logger';
@@ -39,15 +40,7 @@ if (!emailConfigured) {
 
 // Global middleware
 app.use('*', honoLogger());
-app.use(
-  '*',
-  cors({
-    origin: [env.PROXY_URL, env.ANALYSE_URL, env.AUTH_URL, 'http://localhost:3000'],
-    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
-  })
-);
+app.use('*', cors(getWhyopsCorsOptions()));
 
 const magicLinkLimiter: MiddlewareHandler = async (c: Context, next) => {
   const ipHeader =

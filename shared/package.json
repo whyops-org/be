@@ -9,6 +9,7 @@
     "./utils": "./src/utils/index.ts",
     "./logger": "./src/utils/logger.ts",
     "./env": "./src/config/env.ts",
+    "./cors": "./src/config/cors.ts",
     "./services": "./src/services/index.ts"
   },
   "scripts": {

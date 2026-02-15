@@ -3,9 +3,8 @@ import { createServiceLogger } from '@whyops/shared/logger';
 import { ApiKey, Environment, Project, Provider } from '@whyops/shared/models';
 import { hashApiKey } from '@whyops/shared/utils';
 import type { Context, Next } from 'hono';
-import { getCookie } from 'hono/cookie';
 
-const logger = createServiceLogger('analyse:auth');
+const logger = createServiceLogger('analyse:session-auth');
 
 export interface AnalyseAuthContext {
   userId: string;
@@ -18,14 +17,15 @@ export interface AnalyseAuthContext {
 declare module 'hono' {
   interface ContextVariableMap {
     analyseAuth: AnalyseAuthContext;
+    sessionUserId?: string;
   }
 }
 
 /**
- * Auth middleware for analyse service
- * Supports both API key and session-based authentication
+ * Middleware to authenticate analyse requests.
+ * Supports both API key auth and Better Auth session cookie auth.
  */
-export async function analyseAuthMiddleware(c: Context, next: Next) {
+export async function sessionAuthMiddleware(c: Context, next: Next) {
   if (c.get('analyseAuth')) {
     await next();
     return;
@@ -41,12 +41,9 @@ export async function analyseAuthMiddleware(c: Context, next: Next) {
     apiKey = xApiKeyHeader.trim();
   }
 
-  // First try API key auth (Authorization: Bearer ... or X-API-Key)
   if (apiKey) {
-
     try {
       const keyHash = hashApiKey(apiKey);
-
       const apiKeyRecord = await ApiKey.findOne({
         where: {
           keyHash,
@@ -73,32 +70,30 @@ export async function analyseAuthMiddleware(c: Context, next: Next) {
     }
   }
 
-  // If no API key auth, try session-based auth via Better Auth cookie
+  // If API key auth did not set context, try Better Auth session cookie auth
   if (!c.get('analyseAuth')) {
     try {
       let sessionUserId = c.get('sessionUserId');
 
+      console.log(c.req.raw.headers)
+
       if (!sessionUserId) {
-        const sessionToken = getCookie(c, 'better-auth.session_token');
+        const authUrl = env.AUTH_URL.replace(/\/$/, '');
+        const response = await fetch(`${authUrl}/api/auth/get-session`, {
+          method: 'GET',
+          headers: c.req.raw.headers,
+        });
 
-        if (sessionToken) {
-          const authUrl = env.AUTH_URL.replace(/\/$/, '');
-          const response = await fetch(`${authUrl}/api/auth/get-session`, {
-            method: 'GET',
-            headers: {
-              'Cookie': `better-auth.session_token=${sessionToken}`,
-              'Content-Type': 'application/json',
-            },
-            credentials: 'include',
-          });
+        if (response.ok) {
+          const data = await response.json() as {
+            user?: { id: string };
+            session?: { id: string; userId: string };
+          } | null;
 
-          if (response.ok) {
-            const data = await response.json() as { user?: { id: string } };
-            sessionUserId = data?.user?.id;
+          sessionUserId = data?.user?.id;
 
-            if (sessionUserId) {
-              c.set('sessionUserId', sessionUserId);
-            }
+          if (sessionUserId) {
+            c.set('sessionUserId', sessionUserId);
           }
         }
       }

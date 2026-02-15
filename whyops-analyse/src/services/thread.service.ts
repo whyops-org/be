@@ -1,6 +1,6 @@
 import { createServiceLogger } from '@whyops/shared/logger';
 import { Entity, LLMEvent, Trace } from '@whyops/shared/models';
-import { Op } from 'sequelize';
+import { Op, QueryTypes } from 'sequelize';
 
 const logger = createServiceLogger('analyse:thread-service');
 
@@ -10,10 +10,36 @@ export interface ThreadListItem {
   providerId?: string;
   entityId?: string;
   entityName?: string;
+  model?: string;
+  systemPrompt?: string;
+  tools?: any[];
+  metadata?: Record<string, any>;
   lastActivity: Date;
+  lastEventTimestamp?: Date;
   eventCount: number;
   duration?: number; // milliseconds
   firstEventTimestamp?: Date;
+}
+
+interface ThreadListRow {
+  threadId: string;
+  userId: string;
+  providerId?: string;
+  entityId?: string;
+  entityName?: string;
+  model?: string;
+  systemPrompt?: string;
+  tools?: any;
+  metadata?: any;
+  lastActivity: string | Date;
+  lastEventTimestamp?: string | Date;
+  eventCount: string | number;
+  firstEventTimestamp?: string | Date;
+  duration?: string | number;
+}
+
+interface ThreadCountRow {
+  total: string | number;
 }
 
 export interface EventDetail {
@@ -36,6 +62,7 @@ export interface ThreadDetail {
   providerId?: string;
   entityId?: string;
   entityName?: string;
+  lastActivity: Date;
   model?: string;
   systemPrompt?: string;
   tools?: any[];
@@ -79,65 +106,133 @@ export class ThreadService {
    * List all threads with duration calculation
    */
   static async listThreads(filters: {
-    userId?: string;
-    limit?: number;
-    offset?: number;
-  }): Promise<{ threads: ThreadListItem[]; total?: number }> {
-    const { userId, limit = 50, offset = 0 } = filters;
-
-    const where: any = {};
-    if (userId) where.userId = userId;
+    userId: string;
+    agentName?: string;
+    page?: number;
+    count?: number;
+  }): Promise<{ threads: ThreadListItem[]; pagination: { total: number; count: number; page: number; totalPages: number; hasMore: boolean } }> {
+    const { userId, agentName, page = 1, count = 20 } = filters;
+    const offset = (page - 1) * count;
 
     try {
-      // Get all traces with their first and last event timestamps
-      const traces = await Trace.findAll({
-        where,
-        include: [
-          {
-            model: Entity,
-            as: 'entity',
-            attributes: ['id', 'name'],
-            required: false,
+      const countRows = await Trace.sequelize!.query<ThreadCountRow>(
+        `
+          SELECT COUNT(DISTINCT t.id) AS total
+          FROM traces t
+          LEFT JOIN entities e ON e.id = t.entity_id
+          LEFT JOIN agents a ON a.id = e.agent_id
+          WHERE t.user_id = :userId
+            AND (:agentName IS NULL OR a.name = :agentName)
+        `,
+        {
+          replacements: {
+            userId,
+            agentName: agentName || null,
           },
-        ],
-        limit,
-        offset,
-        order: [['createdAt', 'DESC']],
-      });
-
-      const threads: ThreadListItem[] = await Promise.all(
-        traces.map(async (trace) => {
-          const events = await LLMEvent.findAll({
-            where: { traceId: trace.id },
-            attributes: ['timestamp'],
-            order: [['timestamp', 'ASC']],
-          });
-
-          const eventCount = events.length;
-          const firstEvent = events[0]?.timestamp;
-          const lastEvent = events[eventCount - 1]?.timestamp;
-          const duration =
-            firstEvent && lastEvent
-              ? lastEvent.getTime() - firstEvent.getTime()
-              : undefined;
-
-          return {
-            threadId: trace.id,
-            userId: trace.userId,
-            providerId: trace.providerId,
-            entityId: trace.entityId,
-            entityName: (trace as any).entity?.name,
-            lastActivity: lastEvent || trace.createdAt,
-            eventCount,
-            duration,
-            firstEventTimestamp: firstEvent,
-          };
-        })
+          type: QueryTypes.SELECT,
+        }
       );
 
-      return { threads };
+      const total = Number(countRows[0]?.total || 0);
+
+      const rows = await Trace.sequelize!.query<ThreadListRow>(
+        `
+          WITH event_stats AS (
+            SELECT
+              ev.trace_id AS trace_id,
+              MAX(ev.timestamp) AS last_event_timestamp,
+              MIN(ev.timestamp) AS first_event_timestamp,
+              COUNT(ev.id) AS event_count
+            FROM trace_events ev
+            GROUP BY ev.trace_id
+          ),
+          latest_event AS (
+            SELECT DISTINCT ON (ev.trace_id)
+              ev.trace_id,
+              ev.provider_id,
+              ev.metadata
+            FROM trace_events ev
+            ORDER BY ev.trace_id, ev.timestamp DESC
+          )
+          SELECT
+            t.id AS "threadId",
+            t.user_id AS "userId",
+            COALESCE(t.provider_id, le.provider_id) AS "providerId",
+            t.entity_id AS "entityId",
+            e.name AS "entityName",
+            COALESCE(
+              t.model,
+              NULLIF(le.metadata->>'model', ''),
+              NULLIF(le.metadata->>'modelName', '')
+            ) AS "model",
+            COALESCE(
+              t.system_message,
+              NULLIF(e.metadata->>'systemPrompt', '')
+            ) AS "systemPrompt",
+            COALESCE(
+              t.tools,
+              e.metadata->'tools'
+            ) AS "tools",
+            t.metadata AS "metadata",
+            COALESCE(es.last_event_timestamp, t.created_at) AS "lastActivity",
+            es.last_event_timestamp AS "lastEventTimestamp",
+            COALESCE(es.event_count, 0) AS "eventCount",
+            es.first_event_timestamp AS "firstEventTimestamp",
+            CASE
+              WHEN COALESCE(es.event_count, 0) > 0
+                THEN EXTRACT(EPOCH FROM (es.last_event_timestamp - es.first_event_timestamp)) * 1000
+              ELSE NULL
+            END AS "duration"
+          FROM traces t
+          LEFT JOIN entities e ON e.id = t.entity_id
+          LEFT JOIN agents a ON a.id = e.agent_id
+          LEFT JOIN event_stats es ON es.trace_id = t.id
+          LEFT JOIN latest_event le ON le.trace_id = t.id
+          WHERE t.user_id = :userId
+            AND (:agentName IS NULL OR a.name = :agentName)
+          ORDER BY COALESCE(es.last_event_timestamp, t.created_at) DESC
+          LIMIT :count OFFSET :offset
+        `,
+        {
+          replacements: {
+            userId,
+            agentName: agentName || null,
+            count,
+            offset,
+          },
+          type: QueryTypes.SELECT,
+        }
+      );
+
+      const threads: ThreadListItem[] = rows.map((row) => ({
+        threadId: row.threadId,
+        userId: row.userId,
+        providerId: row.providerId,
+        entityId: row.entityId,
+        entityName: row.entityName,
+        model: row.model,
+        systemPrompt: row.systemPrompt,
+        tools: row.tools,
+        metadata: row.metadata,
+        lastActivity: new Date(row.lastActivity),
+        lastEventTimestamp: row.lastEventTimestamp ? new Date(row.lastEventTimestamp) : undefined,
+        eventCount: Number(row.eventCount || 0),
+        duration: row.duration === null || row.duration === undefined ? undefined : Number(row.duration),
+        firstEventTimestamp: row.firstEventTimestamp ? new Date(row.firstEventTimestamp) : undefined,
+      }));
+
+      return {
+        threads,
+        pagination: {
+          total,
+          count,
+          page,
+          totalPages: Math.ceil(total / count),
+          hasMore: page * count < total,
+        },
+      };
     } catch (error) {
-      logger.error({ error, userId }, 'Failed to list threads');
+      logger.error({ error, userId, agentName, page, count }, 'Failed to list threads');
       throw new Error('Failed to list threads');
     }
   }
@@ -145,10 +240,14 @@ export class ThreadService {
   /**
    * Get complete thread details with timing analysis
    */
-  static async getThreadDetail(threadId: string): Promise<ThreadDetail | null> {
+  static async getThreadDetail(threadId: string, userId: string): Promise<ThreadDetail | null> {
     try {
       // Get trace with entity information
-      const trace = await Trace.findByPk(threadId, {
+      const trace = await Trace.findOne({
+        where: {
+          id: threadId,
+          userId,
+        },
         include: [
           {
             model: Entity,
@@ -177,8 +276,9 @@ export class ThreadService {
       const lastEvent = events[events.length - 1];
       const duration = lastEvent.timestamp.getTime() - firstEvent.timestamp.getTime();
 
-      // Detect late events (events with earlier stepId but later timestamp)
+      // Detect late events in O(n) after timestamp ordering
       let hasLateEvents = false;
+      let maxStepSeen = Number.MIN_SAFE_INTEGER;
       const eventDetails: EventDetail[] = events.map((event, index) => {
         const timeSinceStart =
           event.timestamp.getTime() - firstEvent.timestamp.getTime();
@@ -189,13 +289,11 @@ export class ThreadService {
           ? nextEvent.timestamp.getTime() - event.timestamp.getTime()
           : undefined;
 
-        // Detect if this is a late event (arrived after an event with higher stepId)
-        const isLateEvent = events.some(
-          (e, i) =>
-            i < index &&
-            e.stepId > event.stepId &&
-            e.timestamp < event.timestamp
-        );
+        // Late event: lower step appears after higher step in timestamp-sorted stream
+        const isLateEvent = event.stepId < maxStepSeen;
+        if (event.stepId > maxStepSeen) {
+          maxStepSeen = event.stepId;
+        }
 
         if (isLateEvent) hasLateEvents = true;
 
@@ -216,12 +314,13 @@ export class ThreadService {
 
       // Calculate statistics
       const totalTokens = events.reduce((sum, e) => {
-        const usage = e.metadata?.usage || e.content?.usage;
-        return sum + (usage?.totalTokens || 0);
+        const usage = e.metadata?.usage || e.content?.usage || {};
+        const total = usage?.totalTokens ?? usage?.total_tokens ?? 0;
+        return sum + Number(total || 0);
       }, 0);
 
       const totalLatency = events.reduce(
-        (sum, e) => sum + (e.metadata?.latencyMs || 0),
+        (sum, e) => sum + Number(e.metadata?.latencyMs || 0),
         0
       );
 
@@ -233,6 +332,7 @@ export class ThreadService {
         providerId: trace.providerId,
         entityId: trace.entityId,
         entityName: (trace as any).entity?.name,
+        lastActivity: lastEvent.timestamp,
         model: trace.model,
         systemPrompt: trace.systemMessage,
         tools: trace.tools,

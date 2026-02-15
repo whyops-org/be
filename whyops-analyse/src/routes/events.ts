@@ -3,7 +3,6 @@ import { createServiceLogger } from '@whyops/shared/logger';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { EventController } from '../controllers';
-import { analyseAuthMiddleware } from '../middleware/auth';
 
 const logger = createServiceLogger('analyse:events-routes');
 const app = new Hono();
@@ -54,7 +53,7 @@ const batchToolResultSchema = z.union([toolResultSchema, z.array(toolResultSchem
 function processEventData(
   data: any,
   auth: any,
-  headers: { userId?: string; projectId?: string; environmentId?: string }
+  headers: { userId?: string; projectId?: string; environmentId?: string; providerId?: string }
 ) {
   const processItem = (item: any) => ({
     ...item,
@@ -62,6 +61,7 @@ function processEventData(
     userId: item.userId || auth?.userId || headers.userId,
     projectId: item.projectId || auth?.projectId || headers.projectId,
     environmentId: item.environmentId || auth?.environmentId || headers.environmentId,
+    providerId: item.providerId || auth?.providerId || headers.providerId,
   });
 
   return Array.isArray(data) ? data.map(processItem) : processItem(data);
@@ -70,7 +70,6 @@ function processEventData(
 // POST /api/events/tool-result - Create tool call response event(s) with automatic eventType
 app.post(
   '/tool-result',
-  analyseAuthMiddleware,
   zValidator('json', batchToolResultSchema, (result, c) => {
     if (!result.success) {
       const errors = result.error.errors.map((e) => ({
@@ -91,6 +90,7 @@ app.post(
       userId: c.req.header('X-User-Id'),
       projectId: c.req.header('X-Project-Id'),
       environmentId: c.req.header('X-Environment-Id'),
+      providerId: c.req.header('X-Provider-Id'),
     };
 
     const processedData = processEventData(data, auth, headers);
@@ -108,7 +108,6 @@ app.post(
 // POST /api/events - Create a new event (or batch of events)
 app.post(
   '/',
-  analyseAuthMiddleware,
   zValidator('json', batchEventSchema, (result, c) => {
     if (!result.success) {
       const errors = result.error.errors.map((e) => ({
@@ -129,6 +128,7 @@ app.post(
       userId: c.req.header('X-User-Id'),
       projectId: c.req.header('X-Project-Id'),
       environmentId: c.req.header('X-Environment-Id'),
+      providerId: c.req.header('X-Provider-Id'),
     };
 
     const processedData = processEventData(data, auth, headers);

@@ -1,16 +1,18 @@
+import { getWhyopsCorsOptions } from '@whyops/shared/cors';
 import { initDatabase } from '@whyops/shared/database';
 import env from '@whyops/shared/env';
 import { createServiceLogger } from '@whyops/shared/logger';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger as honoLogger } from 'hono/logger';
+import { sessionAuthMiddleware } from './middleware/session-auth';
 import analyticsRouter from './routes/analytics';
+import entitiesRouter from './routes/entities';
 import eventsRouter from './routes/events';
 import healthRouter from './routes/health';
+import llmCostsRouter from './routes/llmCosts';
 import threadsRouter from './routes/threads';
 import visualizeRouter from './routes/visualize';
-import entitiesRouter from './routes/entities';
-import llmCostsRouter from './routes/llmCosts';
 
 const logger = createServiceLogger('analyse');
 const app = new Hono();
@@ -20,10 +22,11 @@ await initDatabase();
 
 // Global middleware
 app.use('*', honoLogger());
-app.use('*', cors());
+app.use('*', cors(getWhyopsCorsOptions()));
+app.use('*', sessionAuthMiddleware);
 
 // Routes
-app.route('/health', healthRouter);
+app.route('/api/health', healthRouter);
 app.route('/api/events', eventsRouter);
 app.route('/api/threads', threadsRouter);
 app.route('/api/analytics', analyticsRouter);
