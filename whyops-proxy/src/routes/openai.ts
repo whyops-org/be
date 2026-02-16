@@ -25,6 +25,8 @@ async function trackChatCompletionsStream(
   providerId: string | undefined,
   agentName: string,
   model: string,
+  isCustom: boolean,
+  providerSlug: string | null | undefined,
   startTime: number
 ): Promise<void> {
   const reader = streamBody.getReader();
@@ -78,7 +80,8 @@ async function trackChatCompletionsStream(
       },
       metadata: {
         model,
-        provider: 'openai',
+        provider: isCustom ? 'custom' : 'openai',
+        providerSlug: providerSlug || undefined,
         usage: accumulatedState.usage,
         latencyMs: Date.now() - startTime,
       }
@@ -95,6 +98,8 @@ async function trackResponsesStream(
   providerId: string | undefined,
   agentName: string,
   model: string,
+  isCustom: boolean,
+  providerSlug: string | null | undefined,
   startTime: number
 ): Promise<void> {
   const reader = streamBody.getReader();
@@ -147,7 +152,8 @@ async function trackResponsesStream(
       },
       metadata: {
         model,
-        provider: 'openai',
+        provider: isCustom ? 'custom' : 'openai',
+        providerSlug: providerSlug || undefined,
         usage: accumulatedState.usage,
         latencyMs: Date.now() - startTime,
       }
@@ -296,6 +302,8 @@ app.post('/chat/completions', async (c) => {
         provider.id,
         agentName,
         requestBody.model,
+        isCustom,
+        providerSlug,
         startTime
       ).catch((error) => logger.warn({ error, traceId }, 'Failed to parse OpenAI streaming analytics'));
 
@@ -456,7 +464,8 @@ app.post('/chat/completions', async (c) => {
         },
         metadata: {
           model: requestBody.model,
-          provider: 'openai',
+          provider: isCustom ? 'custom' : 'openai',
+          providerSlug: providerSlug || undefined,
           usage: parsedResponse.usage,
           latencyMs,
         }
@@ -661,6 +670,8 @@ app.post('/responses', async (c) => {
         provider.id,
         agentName,
         requestBody.model,
+        isCustom,
+        providerSlug,
         startTime
       ).catch((error) => logger.warn({ error, traceId }, 'Failed to parse OpenAI /responses streaming analytics'));
 
@@ -765,7 +776,8 @@ app.post('/responses', async (c) => {
         },
         metadata: {
           model: requestBody.model,
-          provider: 'openai',
+          provider: isCustom ? 'custom' : 'openai',
+          providerSlug: providerSlug || undefined,
           usage: parsedResponse.usage,
           latencyMs,
         }

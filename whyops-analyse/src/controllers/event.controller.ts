@@ -33,6 +33,14 @@ export class EventController {
         return c.json({ error: 'Missing auth context. Provide API key or X-User-Id, X-Project-Id, X-Environment-Id headers.' }, 400);
       }
 
+      if (error?.message?.startsWith('MISSING_MODEL:')) {
+        return c.json({ error: error.message }, 400);
+      }
+
+      if (error?.message?.startsWith('MISSING_PROVIDER:')) {
+        return c.json({ error: error.message }, 400);
+      }
+
       if (error?.message === 'TRACE_AGENT_CONFLICT') {
         return c.json({ error: 'Trace is already bound to a different agent/version for this traceId' }, 409);
       }
