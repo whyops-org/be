@@ -44,9 +44,30 @@ export interface EventListFilters {
 
 export class EventService {
   /**
+   * Validate event data before processing
+   */
+  private static validateEventData(data: EventData): void {
+    // llm_response events MUST have model and provider in metadata
+    if (data.eventType === 'llm_response') {
+      const model = data.metadata?.model;
+      const provider = data.metadata?.provider;
+
+      if (!model) {
+        throw new Error('MISSING_MODEL: llm_response events require "model" in metadata');
+      }
+      if (!provider) {
+        throw new Error('MISSING_PROVIDER: llm_response events require "provider" in metadata');
+      }
+    }
+  }
+
+  /**
    * Process and save an event with idempotency, sampling, and step management
    */
   static async processEvent(data: EventData): Promise<EventProcessResult> {
+    // Validate event data
+    this.validateEventData(data);
+
     // Wrap in per-trace queue for sequential processing
     return traceQueue.getQueue(data.traceId).add(async () => {
       // 1. Ensure Trace Exists
