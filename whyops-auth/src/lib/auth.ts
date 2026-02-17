@@ -1,3 +1,4 @@
+import { logger } from '@shared/utils';
 import env from '@whyops/shared/env';
 import { betterAuth } from 'better-auth';
 import { createAuthMiddleware } from 'better-auth/api';
@@ -16,6 +17,8 @@ const db = new Kysely({
     }),
   }),
 });
+
+logger.info(`Initialized Kysely database connection for Better Auth, Base URL: ${env.BETTER_AUTH_URL}, Secret: ${env.BETTER_AUTH_SECRET}`);
 
 // Configure Better Auth
 export const auth = betterAuth({
@@ -95,10 +98,10 @@ export const auth = betterAuth({
               isActive: true,
               organizationId: (betterAuthUser as any).organizationId || undefined,
             });
-            console.log(`✅ Synced Better Auth user ${betterAuthUser.id} (${betterAuthUser.email}) to Sequelize users table`);
+            logger.info(`✅ Synced Better Auth user ${betterAuthUser.id} (${betterAuthUser.email}) to Sequelize users table`);
           }
         } catch (error) {
-          console.error('❌ Failed to sync user to Sequelize:', error);
+          logger.error('❌ Failed to sync user to Sequelize:', error);
         }
       }
     }),
