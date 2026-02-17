@@ -101,6 +101,9 @@ jobs:
               --resource-group ${{ secrets.RESOURCE_GROUP }} \
               --environment ${{ secrets.CONTAINER_APP_ENVIRONMENT }} \
               --image ${{ secrets.REGISTRY_LOGIN_SERVER }}/whyops-proxy:${{ github.sha }} \
+              --registry-server ${{ secrets.REGISTRY_LOGIN_SERVER }} \
+              --registry-username ${{ secrets.REGISTRY_USERNAME }} \
+              --registry-password ${{ secrets.REGISTRY_PASSWORD }} \
               --target-port 8080 \
               --ingress external \
               --min-replicas 1 \
@@ -194,6 +197,9 @@ jobs:
               --resource-group ${{ secrets.RESOURCE_GROUP }} \
               --environment ${{ secrets.CONTAINER_APP_ENVIRONMENT }} \
               --image ${{ secrets.REGISTRY_LOGIN_SERVER }}/whyops-analyse:${{ github.sha }} \
+              --registry-server ${{ secrets.REGISTRY_LOGIN_SERVER }} \
+              --registry-username ${{ secrets.REGISTRY_USERNAME }} \
+              --registry-password ${{ secrets.REGISTRY_PASSWORD }} \
               --target-port 8081 \
               --ingress external \
               --min-replicas 1 \
@@ -287,6 +293,9 @@ jobs:
               --resource-group ${{ secrets.RESOURCE_GROUP }} \
               --environment ${{ secrets.CONTAINER_APP_ENVIRONMENT }} \
               --image ${{ secrets.REGISTRY_LOGIN_SERVER }}/whyops-auth:${{ github.sha }} \
+              --registry-server ${{ secrets.REGISTRY_LOGIN_SERVER }} \
+              --registry-username ${{ secrets.REGISTRY_USERNAME }} \
+              --registry-password ${{ secrets.REGISTRY_PASSWORD }} \
               --target-port 8082 \
               --ingress external \
               --min-replicas 1 \
