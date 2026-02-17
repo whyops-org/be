@@ -53,15 +53,6 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Set Registry Credentials
-        run: |
-          az containerapp registry set \
-            --name whyops-proxy \
-            --resource-group ${{ secrets.RESOURCE_GROUP }} \
-            --server ${{ secrets.REGISTRY_LOGIN_SERVER }} \
-            --username ${{ secrets.REGISTRY_USERNAME }} \
-            --password ${{ secrets.REGISTRY_PASSWORD }} || true
-
       - name: Deploy to Azure Container Apps (proxy)
         run: |
           ENV_VARS=(
@@ -91,8 +82,10 @@ jobs:
             "MAILEROO_FROM_NAME=${{ secrets.MAILEROO_FROM_NAME || 'WhyOps' }}"
           )
 
-          # Check if container app exists, create if not
-          if az containerapp show --name whyops-proxy --resource-group ${{ secrets.RESOURCE_GROUP }} &>/dev/null; then
+          # Check provisioning state
+          PROVISIONING_STATE=$(az containerapp show --name whyops-proxy --resource-group ${{ secrets.RESOURCE_GROUP }} --query properties.provisioningState -o tsv 2>/dev/null || echo "NotFound")
+          
+          if [[ "$PROVISIONING_STATE" == "Succeeded" ]]; then
             echo "Updating existing whyops-proxy..."
             az containerapp update \
               --name whyops-proxy \
@@ -104,7 +97,8 @@ jobs:
               --memory 0.5Gi \
               --set-env-vars "${ENV_VARS[@]}"
           else
-            echo "Creating whyops-proxy..."
+            echo "Creating whyops-proxy (state: $PROVISIONING_STATE)..."
+            [[ "$PROVISIONING_STATE" != "NotFound" ]] && az containerapp delete --name whyops-proxy --resource-group ${{ secrets.RESOURCE_GROUP }} --yes || true
             az containerapp create \
               --name whyops-proxy \
               --resource-group ${{ secrets.RESOURCE_GROUP }} \
@@ -159,14 +153,10 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Set Registry Credentials
-        run: |
-          az containerapp registry set \
-            --name whyops-analyse \
-            --resource-group ${{ secrets.RESOURCE_GROUP }} \
-            --server ${{ secrets.REGISTRY_LOGIN_SERVER }} \
-            --username ${{ secrets.REGISTRY_USERNAME }} \
-            --password ${{ secrets.REGISTRY_PASSWORD }} || true
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Deploy to Azure Container Apps (analyse)
         run: |
@@ -197,7 +187,9 @@ jobs:
             "MAILEROO_FROM_NAME=${{ secrets.MAILEROO_FROM_NAME || 'WhyOps' }}"
           )
 
-          if az containerapp show --name whyops-analyse --resource-group ${{ secrets.RESOURCE_GROUP }} &>/dev/null; then
+          PROVISIONING_STATE=$(az containerapp show --name whyops-analyse --resource-group ${{ secrets.RESOURCE_GROUP }} --query properties.provisioningState -o tsv 2>/dev/null || echo "NotFound")
+          
+          if [[ "$PROVISIONING_STATE" == "Succeeded" ]]; then
             echo "Updating existing whyops-analyse..."
             az containerapp update \
               --name whyops-analyse \
@@ -209,7 +201,8 @@ jobs:
               --memory 0.5Gi \
               --set-env-vars "${ENV_VARS[@]}"
           else
-            echo "Creating whyops-analyse..."
+            echo "Creating whyops-analyse (state: $PROVISIONING_STATE)..."
+            [[ "$PROVISIONING_STATE" != "NotFound" ]] && az containerapp delete --name whyops-analyse --resource-group ${{ secrets.RESOURCE_GROUP }} --yes || true
             az containerapp create \
               --name whyops-analyse \
               --resource-group ${{ secrets.RESOURCE_GROUP }} \
@@ -264,15 +257,6 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Set Registry Credentials
-        run: |
-          az containerapp registry set \
-            --name whyops-auth \
-            --resource-group ${{ secrets.RESOURCE_GROUP }} \
-            --server ${{ secrets.REGISTRY_LOGIN_SERVER }} \
-            --username ${{ secrets.REGISTRY_USERNAME }} \
-            --password ${{ secrets.REGISTRY_PASSWORD }} || true
-
       - name: Deploy to Azure Container Apps (auth)
         run: |
           ENV_VARS=(
@@ -302,7 +286,9 @@ jobs:
             "MAILEROO_FROM_NAME=${{ secrets.MAILEROO_FROM_NAME || 'WhyOps' }}"
           )
 
-          if az containerapp show --name whyops-auth --resource-group ${{ secrets.RESOURCE_GROUP }} &>/dev/null; then
+          PROVISIONING_STATE=$(az containerapp show --name whyops-auth --resource-group ${{ secrets.RESOURCE_GROUP }} --query properties.provisioningState -o tsv 2>/dev/null || echo "NotFound")
+          
+          if [[ "$PROVISIONING_STATE" == "Succeeded" ]]; then
             echo "Updating existing whyops-auth..."
             az containerapp update \
               --name whyops-auth \
@@ -314,7 +300,8 @@ jobs:
               --memory 0.5Gi \
               --set-env-vars "${ENV_VARS[@]}"
           else
-            echo "Creating whyops-auth..."
+            echo "Creating whyops-auth (state: $PROVISIONING_STATE)..."
+            [[ "$PROVISIONING_STATE" != "NotFound" ]] && az containerapp delete --name whyops-auth --resource-group ${{ secrets.RESOURCE_GROUP }} --yes || true
             az containerapp create \
               --name whyops-auth \
               --resource-group ${{ secrets.RESOURCE_GROUP }} \
