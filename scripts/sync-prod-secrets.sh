@@ -14,8 +14,8 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-if ! gh auth status -R "$REPO" >/dev/null 2>&1; then
-  echo "gh is not authenticated for $REPO. Run: gh auth login" >&2
+if ! gh repo view "$REPO" >/dev/null 2>&1; then
+  echo "Cannot access $REPO. Run: gh auth login" >&2
   exit 1
 fi
 

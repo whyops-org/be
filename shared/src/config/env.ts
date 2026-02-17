@@ -55,8 +55,8 @@ const envSchema = z.object({
   BETTER_AUTH_SECRET: z.string().min(32).default('your-better-auth-secret-change-in-production-min-32-chars'),
   
   // OAuth - GitHub
-  GITHUB_CLIENT_ID: z.string().default(''),
-  GITHUB_CLIENT_SECRET: z.string().optional(),
+  AUTHGH_CLIENT_ID: z.string().default(''),
+  AUTHGH_CLIENT_SECRET: z.string().optional(),
   
   // OAuth - Google
   GOOGLE_CLIENT_ID: z.string().optional(),
