@@ -1,0 +1,225 @@
+name: Deploy to Azure Container Apps
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to deploy'
+        required: true
+        type: choice
+        options:
+          - proxy
+          - analyse
+          - auth
+          - all
+
+env:
+  REGISTRY_NAME: ${{ secrets.REGISTRY_NAME }}
+  IMAGE_NAME: ${{ github.event.inputs.service || 'all' }}
+
+jobs:
+  deploy-proxy:
+    if: github.event.inputs.service == 'proxy' || github.event.inputs.service == 'all' || (github.event.inputs.service == '' && github.event_name == 'push')
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.REGISTRY_NAME }}.azurecr.io
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push proxy image
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: ${{ secrets.REGISTRY_NAME }}.azurecr.io/whyops-proxy:${{ github.sha }}
+          file: ./Dockerfile
+          context: .
+          build-args: |
+            SERVICE=proxy
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to Azure Container Apps (proxy)
+        run: |
+          # Check if container app exists, create if not
+          if az containerapp show --name whyops-proxy --resource-group ${{ secrets.RESOURCE_GROUP }} &>/dev/null; then
+            echo "Updating existing whyops-proxy..."
+            az containerapp update \
+              --name whyops-proxy \
+              --resource-group ${{ secrets.RESOURCE_GROUP }} \
+              --image ${{ secrets.REGISTRY_NAME }}.azurecr.io/whyops-proxy:${{ github.sha }} \
+              --min-replicas 1 \
+              --max-replicas 3 \
+              --cpu 0.25 \
+              --memory 0.5Gi
+          else
+            echo "Creating whyops-proxy..."
+            az containerapp create \
+              --name whyops-proxy \
+              --resource-group ${{ secrets.RESOURCE_GROUP }} \
+              --environment ${{ secrets.CONTAINER_APP_ENVIRONMENT }} \
+              --image ${{ secrets.REGISTRY_NAME }}.azurecr.io/whyops-proxy:${{ github.sha }} \
+              --target-port 8080 \
+              --ingress external \
+              --min-replicas 1 \
+              --max-replicas 3 \
+              --cpu 0.25 \
+              --memory 0.5Gi \
+              --env-vars \
+                NODE_ENV=production \
+                DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+                ANALYSE_URL="${{ secrets.ANALYSE_URL }}" \
+                AUTH_URL="${{ secrets.AUTH_URL }}"
+          fi
+
+  deploy-analyse:
+    if: github.event.inputs.service == 'analyse' || github.event.inputs.service == 'all' || (github.event.inputs.service == '' && github.event_name == 'push')
+    runs-on: ubuntu-latest
+    environment: production
+    needs: deploy-proxy
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.REGISTRY_NAME }}.azurecr.io
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push analyse image
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: ${{ secrets.REGISTRY_NAME }}.azurecr.io/whyops-analyse:${{ github.sha }}
+          file: ./Dockerfile
+          context: .
+          build-args: |
+            SERVICE=analyse
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to Azure Container Apps (analyse)
+        run: |
+          if az containerapp show --name whyops-analyse --resource-group ${{ secrets.RESOURCE_GROUP }} &>/dev/null; then
+            echo "Updating existing whyops-analyse..."
+            az containerapp update \
+              --name whyops-analyse \
+              --resource-group ${{ secrets.RESOURCE_GROUP }} \
+              --image ${{ secrets.REGISTRY_NAME }}.azurecr.io/whyops-analyse:${{ github.sha }} \
+              --min-replicas 1 \
+              --max-replicas 3 \
+              --cpu 0.25 \
+              --memory 0.5Gi
+          else
+            echo "Creating whyops-analyse..."
+            az containerapp create \
+              --name whyops-analyse \
+              --resource-group ${{ secrets.RESOURCE_GROUP }} \
+              --environment ${{ secrets.CONTAINER_APP_ENVIRONMENT }} \
+              --image ${{ secrets.REGISTRY_NAME }}.azurecr.io/whyops-analyse:${{ github.sha }} \
+              --target-port 8081 \
+              --ingress external \
+              --min-replicas 1 \
+              --max-replicas 3 \
+              --cpu 0.25 \
+              --memory 0.5Gi \
+              --env-vars \
+                NODE_ENV=production \
+                DATABASE_URL="${{ secrets.DATABASE_URL }}"
+          fi
+
+  deploy-auth:
+    if: github.event.inputs.service == 'auth' || github.event.inputs.service == 'all' || (github.event.inputs.service == '' && github.event_name == 'push')
+    runs-on: ubuntu-latest
+    environment: production
+    needs: deploy-analyse
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.REGISTRY_NAME }}.azurecr.io
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push auth image
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: ${{ secrets.REGISTRY_NAME }}.azurecr.io/whyops-auth:${{ github.sha }}
+          file: ./Dockerfile
+          context: .
+          build-args: |
+            SERVICE=auth
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to Azure Container Apps (auth)
+        run: |
+          if az containerapp show --name whyops-auth --resource-group ${{ secrets.RESOURCE_GROUP }} &>/dev/null; then
+            echo "Updating existing whyops-auth..."
+            az containerapp update \
+              --name whyops-auth \
+              --resource-group ${{ secrets.RESOURCE_GROUP }} \
+              --image ${{ secrets.REGISTRY_NAME }}.azurecr.io/whyops-auth:${{ github.sha }} \
+              --min-replicas 1 \
+              --max-replicas 3 \
+              --cpu 0.25 \
+              --memory 0.5Gi
+          else
+            echo "Creating whyops-auth..."
+            az containerapp create \
+              --name whyops-auth \
+              --resource-group ${{ secrets.RESOURCE_GROUP }} \
+              --environment ${{ secrets.CONTAINER_APP_ENVIRONMENT }} \
+              --image ${{ secrets.REGISTRY_NAME }}.azurecr.io/whyops-auth:${{ github.sha }} \
+              --target-port 8082 \
+              --ingress external \
+              --min-replicas 1 \
+              --max-replicas 3 \
+              --cpu 0.25 \
+              --memory 0.5Gi \
+              --env-vars \
+                NODE_ENV=production \
+                DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+                JWT_SECRET="${{ secrets.JWT_SECRET }}" \
+                BETTER_AUTH_SECRET="${{ secrets.BETTER_AUTH_SECRET }}" \
+                BETTER_AUTH_URL="${{ secrets.AUTH_URL }}"
+          fi
