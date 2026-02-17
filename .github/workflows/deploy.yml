@@ -18,7 +18,7 @@ env:
 
 jobs:
   deploy-proxy:
-    if: github.event.inputs.service == 'proxy' || github.event.inputs.service == 'all' || (github.event.inputs.service == '' && github.event_name == 'push')
+    if: github.event.inputs.service == 'proxy' || github.event.inputs.service == 'all'
     runs-on: ubuntu-latest
     environment: production
 
@@ -82,7 +82,6 @@ jobs:
             "MAILEROO_FROM_NAME=${{ secrets.MAILEROO_FROM_NAME || 'WhyOps' }}"
           )
 
-          # Check provisioning state
           PROVISIONING_STATE=$(az containerapp show --name whyops-proxy --resource-group ${{ secrets.RESOURCE_GROUP }} --query properties.provisioningState -o tsv 2>/dev/null || echo "NotFound")
           
           if [[ "$PROVISIONING_STATE" == "Succeeded" ]]; then
@@ -117,10 +116,9 @@ jobs:
           fi
 
   deploy-analyse:
-    if: github.event.inputs.service == 'analyse' || github.event.inputs.service == 'all' || (github.event.inputs.service == '' && github.event_name == 'push')
+    if: github.event.inputs.service == 'analyse' || github.event.inputs.service == 'all'
     runs-on: ubuntu-latest
     environment: production
-    needs: deploy-proxy
 
     steps:
       - name: Checkout
@@ -147,11 +145,6 @@ jobs:
             SERVICE=analyse
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Azure Login
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Azure Login
         uses: azure/login@v2
@@ -221,10 +214,9 @@ jobs:
           fi
 
   deploy-auth:
-    if: github.event.inputs.service == 'auth' || github.event.inputs.service == 'all' || (github.event.inputs.service == '' && github.event_name == 'push')
+    if: github.event.inputs.service == 'auth' || github.event.inputs.service == 'all'
     runs-on: ubuntu-latest
     environment: production
-    needs: deploy-analyse
 
     steps:
       - name: Checkout
