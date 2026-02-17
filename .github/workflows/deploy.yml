@@ -80,6 +80,7 @@ jobs:
             "MAILEROO_API_KEY=${{ secrets.MAILEROO_API_KEY }}"
             "MAILEROO_FROM_EMAIL=${{ secrets.MAILEROO_FROM_EMAIL || 'noreply@whyops.com' }}"
             "MAILEROO_FROM_NAME=${{ secrets.MAILEROO_FROM_NAME || 'WhyOps' }}"
+            "TRUSTED_ORIGINS=${{ secrets.TRUSTED_ORIGINS || 'https://app.whyops.com,https://whyops.com' }}"
           )
 
           PROVISIONING_STATE=$(az containerapp show --name whyops-proxy --resource-group ${{ secrets.RESOURCE_GROUP }} --query properties.provisioningState -o tsv 2>/dev/null || echo "NotFound")
@@ -178,6 +179,7 @@ jobs:
             "MAILEROO_API_KEY=${{ secrets.MAILEROO_API_KEY }}"
             "MAILEROO_FROM_EMAIL=${{ secrets.MAILEROO_FROM_EMAIL || 'noreply@whyops.com' }}"
             "MAILEROO_FROM_NAME=${{ secrets.MAILEROO_FROM_NAME || 'WhyOps' }}"
+            "TRUSTED_ORIGINS=${{ secrets.TRUSTED_ORIGINS || 'https://app.whyops.com,https://whyops.com' }}"
           )
 
           PROVISIONING_STATE=$(az containerapp show --name whyops-analyse --resource-group ${{ secrets.RESOURCE_GROUP }} --query properties.provisioningState -o tsv 2>/dev/null || echo "NotFound")
@@ -276,6 +278,7 @@ jobs:
             "MAILEROO_API_KEY=${{ secrets.MAILEROO_API_KEY }}"
             "MAILEROO_FROM_EMAIL=${{ secrets.MAILEROO_FROM_EMAIL || 'noreply@whyops.com' }}"
             "MAILEROO_FROM_NAME=${{ secrets.MAILEROO_FROM_NAME || 'WhyOps' }}"
+            "TRUSTED_ORIGINS=${{ secrets.TRUSTED_ORIGINS || 'https://app.whyops.com,https://whyops.com' }}"
           )
 
           PROVISIONING_STATE=$(az containerapp show --name whyops-auth --resource-group ${{ secrets.RESOURCE_GROUP }} --query properties.provisioningState -o tsv 2>/dev/null || echo "NotFound")
