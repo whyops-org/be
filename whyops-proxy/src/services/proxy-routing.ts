@@ -86,11 +86,7 @@ export function parseModelField(model: string): { providerSlug: string | null; a
   }
 
   const parts = model.split('/');
-  if (parts[0].includes('-')) {
-    return { providerSlug: parts[0], actualModel: parts.slice(1).join('/') };
-  }
-
-  return { providerSlug: null, actualModel: model };
+  return { providerSlug: parts[0], actualModel: parts.slice(1).join('/') };
 }
 
 export async function getProviderBySlugOrDefault(
