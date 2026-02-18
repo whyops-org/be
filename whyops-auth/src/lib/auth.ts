@@ -108,14 +108,13 @@ export const auth = betterAuth({
   },
   advanced: {
     defaultCookieAttributes: {
-      sameSite: 'none',
+      sameSite: env.NODE_ENV === 'production' ? 'none' : 'lax',
       httpOnly: true,
       path: '/',
       domain: env.COOKIE_DOMAIN || undefined,
+      secure: env.NODE_ENV === 'production',
     },
-    useSecureCookies: false,
-    
-
+    useSecureCookies: env.NODE_ENV === 'production',
   },
   trustedOrigins: [
     env.PROXY_URL,
