@@ -1,5 +1,6 @@
 import { createServiceLogger } from '@whyops/shared/logger';
 import { Entity, LLMEvent, Trace } from '@whyops/shared/models';
+import { llmCostService } from '@whyops/shared/services';
 import { Op, QueryTypes } from 'sequelize';
 
 const logger = createServiceLogger('analyse:thread-service');
@@ -119,6 +120,7 @@ export interface ThreadDetail {
     offset: number;
     hasMore: boolean;
   };
+  cost?: any[];
 }
 
 export interface GraphNode {
@@ -352,7 +354,7 @@ export class ThreadService {
           {
             model: Entity,
             as: 'entity',
-            attributes: ['id', 'name'],
+            attributes: ['id', 'name', 'metadata'],
             required: false,
           },
         ],
@@ -498,6 +500,17 @@ export class ThreadService {
         };
       });
 
+      const entityMetadata = (trace as any).entity?.metadata as Record<string, any> | undefined;
+      const resolvedSystemPrompt = includeSystemPrompt
+        ? (trace.systemMessage || entityMetadata?.systemPrompt || undefined)
+        : undefined;
+      const resolvedTools = includeTools
+        ? (trace.tools || entityMetadata?.tools || undefined)
+        : undefined;
+
+      const modelForCost = trace.model || (trace.metadata as any)?.model;
+      const cost = modelForCost ? await llmCostService.getCosts([modelForCost]) : [];
+
       return {
         threadId: trace.id,
         userId: trace.userId,
@@ -505,9 +518,9 @@ export class ThreadService {
         entityId: trace.entityId,
         entityName: (trace as any).entity?.name,
         lastActivity: lastEventTimestamp,
-        model: trace.model,
-        systemPrompt: includeSystemPrompt ? trace.systemMessage : undefined,
-        tools: includeTools ? trace.tools : undefined,
+        model: trace.model || (trace.metadata as any)?.model,
+        systemPrompt: resolvedSystemPrompt,
+        tools: resolvedTools,
         metadata: includeMetadata ? trace.metadata : undefined,
         firstEventTimestamp,
         lastEventTimestamp,
@@ -525,6 +538,7 @@ export class ThreadService {
           offset: eventOffset,
           hasMore: eventOffset + eventLimit < eventCount,
         },
+        cost,
       };
     } catch (error) {
       logger.error({ error, threadId }, 'Failed to get thread detail');

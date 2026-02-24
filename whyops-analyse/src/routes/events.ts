@@ -3,14 +3,18 @@ import { createServiceLogger } from '@whyops/shared/logger';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { EventController } from '../controllers';
+import { eventsHelp } from '../docs/events-help';
 
 const logger = createServiceLogger('analyse:events-routes');
 const app = new Hono();
 
 // Validation schemas - userId, projectId, environmentId are optional (extracted from headers)
 const eventSchema = z.object({
-  eventType: z.enum(['user_message', 'llm_response', 'tool_call', 'tool_call_request', 'tool_call_response', 'error'], {
-    errorMap: () => ({ message: "Invalid event type. Must be one of: 'user_message', 'llm_response', 'tool_call', 'tool_call_request', 'tool_call_response', 'error'" }),
+  eventType: z.enum(['user_message', 'llm_response', 'tool_call', 'tool_call_request', 'tool_call_response', 'tool_result', 'error'], {
+    errorMap: () => ({
+      message:
+        "Invalid event type. Must be one of: 'user_message', 'llm_response', 'tool_call', 'tool_call_request', 'tool_call_response', 'tool_result', 'error'. See /api/events/help.",
+    }),
   }),
   traceId: z.string().min(1).max(128, "Trace ID must be between 1 and 128 characters"),
   spanId: z.string().max(128, "Span ID must be at most 128 characters").optional(),
@@ -26,6 +30,16 @@ const eventSchema = z.object({
   content: z.any().optional(),
   metadata: z.record(z.any()).optional(),
   idempotencyKey: z.string().max(128, "Idempotency Key must be at most 128 characters").optional(),
+}).superRefine((data, ctx) => {
+  if (data.eventType === 'tool_call_request' || data.eventType === 'tool_call_response') {
+    if (!data.metadata || (data.metadata as any).tool === undefined || (data.metadata as any).tool === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['metadata', 'tool'],
+        message: "metadata.tool is required for tool_call_request and tool_call_response. See /api/events/help.",
+      });
+    }
+  }
 });
 
 const batchEventSchema = z.union([eventSchema, z.array(eventSchema)]);
@@ -45,6 +59,14 @@ const toolResultSchema = z.object({
   content: z.any().optional(),
   metadata: z.record(z.any()).optional(),
   idempotencyKey: z.string().max(128, "Idempotency Key must be at most 128 characters").optional(),
+}).superRefine((data, ctx) => {
+  if (!data.metadata || (data.metadata as any).tool === undefined || (data.metadata as any).tool === null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['metadata', 'tool'],
+      message: "metadata.tool is required for tool_call_response. See /api/events/help.",
+    });
+  }
 });
 
 const batchToolResultSchema = z.union([toolResultSchema, z.array(toolResultSchema)]);
@@ -142,6 +164,9 @@ app.post(
 
 // GET /api/events - List events (with filters)
 app.get('/', EventController.listEvents);
+
+// GET /api/events/help - Supported events and schema
+app.get('/help', (c) => c.json(eventsHelp));
 
 // GET /api/events/:id - Get single event
 app.get('/:id', EventController.getEvent);

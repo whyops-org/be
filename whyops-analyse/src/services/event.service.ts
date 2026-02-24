@@ -9,7 +9,7 @@ import { TraceService } from './trace.service';
 const logger = createServiceLogger('analyse:event-service');
 
 export interface EventData {
-  eventType: 'user_message' | 'llm_response' | 'tool_call' | 'tool_call_request' | 'tool_call_response' | 'error';
+  eventType: 'user_message' | 'llm_response' | 'tool_call' | 'tool_call_request' | 'tool_call_response' | 'tool_result' | 'error';
   traceId: string;
   agentName: string;
   spanId?: string;

@@ -10,6 +10,25 @@ import { SseEventDecoder } from '../services/sse';
 const logger = createServiceLogger('proxy:anthropic');
 const app = new Hono();
 
+function determineAnthropicRequestEventType(messages: any[] | undefined): 'user_message' | 'tool_result' {
+  if (!messages || !Array.isArray(messages)) return 'user_message';
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    const role = msg?.role;
+    if (role === 'system') continue;
+
+    const content = msg?.content;
+    if (Array.isArray(content) && content.some((item: any) => item?.type === 'tool_result')) {
+      return 'tool_result';
+    }
+
+    return 'user_message';
+  }
+
+  return 'user_message';
+}
+
 function responseFromUpstreamError(status: number, contentType: string | null, body: string): Response {
   const headers = new Headers();
   if (contentType) {
@@ -41,6 +60,7 @@ async function trackAnthropicStream(
     stop_reason: null,
     usage: { input_tokens: 0, output_tokens: 0 },
   };
+  const toolCalls: any[] = [];
 
   try {
     while (true) {
@@ -53,6 +73,34 @@ async function trackAnthropicStream(
       for (const data of events) {
         try {
           const parsed = JSON.parse(data);
+
+          if (parsed.type === 'content_block_start' && parsed.content_block?.type === 'tool_use') {
+            const index = typeof parsed.index === 'number' ? parsed.index : toolCalls.length;
+            const input = parsed.content_block.input ?? {};
+            toolCalls[index] = {
+              id: parsed.content_block.id,
+              type: 'function',
+              function: {
+                name: parsed.content_block.name,
+                arguments: JSON.stringify(input),
+              },
+            };
+          }
+
+          if (parsed.type === 'content_block_delta' && parsed.delta?.type === 'input_json_delta') {
+            const index = typeof parsed.index === 'number' ? parsed.index : 0;
+            if (!toolCalls[index]) {
+              toolCalls[index] = {
+                id: undefined,
+                type: 'function',
+                function: {
+                  name: undefined,
+                  arguments: '',
+                },
+              };
+            }
+            toolCalls[index].function.arguments = (toolCalls[index].function.arguments || '') + (parsed.delta.partial_json || '');
+          }
 
           if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
             accumulatedResponse.content[0].text += parsed.delta.text;
@@ -95,6 +143,7 @@ async function trackAnthropicStream(
       content: {
         content: accumulatedResponse.content[0].text,
         finishReason: accumulatedResponse.stop_reason,
+        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       },
       metadata: {
         provider: 'anthropic',
@@ -164,7 +213,7 @@ app.post('/messages', async (c) => {
     };
 
     dispatchAnalyseEvent(auth.apiKey, {
-      eventType: 'user_message',
+      eventType: determineAnthropicRequestEventType(requestBody.messages),
       traceId,
       spanId,
       providerId: provider?.id,
@@ -270,6 +319,19 @@ app.post('/messages', async (c) => {
         return c.json(responseData, response.status as any);
       }
 
+      const toolCalls = Array.isArray(responseData.content)
+        ? responseData.content
+            .filter((item: any) => item?.type === 'tool_use')
+            .map((item: any) => ({
+              id: item.id,
+              type: 'function',
+              function: {
+                name: item.name,
+                arguments: JSON.stringify(item.input ?? {}),
+              },
+            }))
+        : [];
+
       dispatchAnalyseEvent(auth.apiKey, {
         eventType: 'llm_response',
         traceId,
@@ -279,6 +341,7 @@ app.post('/messages', async (c) => {
         content: {
           content: responseData.content?.[0]?.text,
           finishReason: responseData.stop_reason,
+          toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
         },
         metadata: {
           provider: 'anthropic',

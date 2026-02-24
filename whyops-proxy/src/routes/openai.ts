@@ -1,15 +1,52 @@
-import type { ApiKeyAuthContext } from '@whyops/shared/middleware';
 import env from '@whyops/shared/env';
 import { createServiceLogger } from '@whyops/shared/logger';
+import type { ApiKeyAuthContext } from '@whyops/shared/middleware';
 import { decodeSignature, encodeSignature, generateSpanId, generateThreadId, stripSignature } from '@whyops/shared/utils';
 import { Hono } from 'hono';
 import { OpenAIParser } from '../parsers/openai-parser';
+import type {
+  OpenAIChatCompletionRequest,
+  OpenAIChatCompletionResponse,
+  OpenAIChatCompletionChunk,
+  OpenAIResponsesRequest,
+  OpenAIResponsesResponse,
+  OpenAIResponsesStreamEvent,
+} from '../types/openai';
 import { dispatchAnalyseEvent } from '../services/async-events';
 import { copyProxyResponseHeaders, resolveProviderFromModel, validateResolvedProvider } from '../services/proxy-routing';
 import { SseEventDecoder } from '../services/sse';
 
 const logger = createServiceLogger('proxy:openai');
 const app = new Hono();
+
+function determineOpenAIRequestEventType(messages: any[] | undefined): 'user_message' | 'tool_result' {
+  if (!messages || !Array.isArray(messages)) return 'user_message';
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    const role = msg?.role;
+    if (role === 'system') continue;
+    if (role === 'tool' || role === 'function') return 'tool_result';
+    return 'user_message';
+  }
+
+  return 'user_message';
+}
+
+function determineResponsesRequestEventType(input: OpenAIResponsesRequest['input']): 'user_message' | 'tool_result' {
+  if (!input || typeof input === 'string') return 'user_message';
+  if (!Array.isArray(input)) return 'user_message';
+
+  for (let i = input.length - 1; i >= 0; i--) {
+    const msg = input[i] as any;
+    const role = msg?.role;
+    if (role === 'system') continue;
+    if (role === 'tool') return 'tool_result';
+    return 'user_message';
+  }
+
+  return 'user_message';
+}
 
 function responseFromUpstreamError(status: number, contentType: string | null, body: string): Response {
   const headers = new Headers();
@@ -43,13 +80,15 @@ async function trackChatCompletionsStream(
       const textChunk = decoder.decode(value, { stream: true });
       const events = sseDecoder.push(textChunk);
 
+
+
       for (const data of events) {
         if (data === '[DONE]') {
           continue;
         }
 
         try {
-          const parsed = JSON.parse(data);
+          const parsed = JSON.parse(data) as OpenAIChatCompletionChunk;
           accumulatedState = OpenAIParser.parseStreamChunk(parsed, accumulatedState);
         } catch {
           // Ignore malformed chunks for analytics only path
@@ -61,7 +100,7 @@ async function trackChatCompletionsStream(
     for (const data of finalEvents) {
       if (data === '[DONE]') continue;
       try {
-        const parsed = JSON.parse(data);
+        const parsed = JSON.parse(data) as OpenAIChatCompletionChunk;
         accumulatedState = OpenAIParser.parseStreamChunk(parsed, accumulatedState);
       } catch {
         // Ignore malformed chunks for analytics only path
@@ -78,7 +117,6 @@ async function trackChatCompletionsStream(
         content: accumulatedState.content,
         toolCalls: accumulatedState.toolCalls,
         finishReason: accumulatedState.finishReason,
-    
       },
       metadata: {
         model,
@@ -108,6 +146,7 @@ async function trackResponsesStream(
   const decoder = new TextDecoder();
   const sseDecoder = new SseEventDecoder();
   let accumulatedState = OpenAIParser.getInitialStreamState();
+  const toolCallState = new Map<string, any>();
 
   try {
     while (true) {
@@ -123,8 +162,8 @@ async function trackResponsesStream(
         }
 
         try {
-          const parsed = JSON.parse(data);
-          accumulatedState = OpenAIParser.parseResponsesStreamChunk(parsed, accumulatedState);
+          const parsed = JSON.parse(data) as OpenAIResponsesStreamEvent;
+          accumulatedState = OpenAIParser.parseResponsesStreamChunk(parsed, accumulatedState, toolCallState);
         } catch {
           // Ignore malformed chunks for analytics only path
         }
@@ -135,8 +174,8 @@ async function trackResponsesStream(
     for (const data of finalEvents) {
       if (data === '[DONE]') continue;
       try {
-        const parsed = JSON.parse(data);
-        accumulatedState = OpenAIParser.parseResponsesStreamChunk(parsed, accumulatedState);
+        const parsed = JSON.parse(data) as OpenAIResponsesStreamEvent;
+        accumulatedState = OpenAIParser.parseResponsesStreamChunk(parsed, accumulatedState, toolCallState);
       } catch {
         // Ignore malformed chunks for analytics only path
       }
@@ -150,6 +189,7 @@ async function trackResponsesStream(
       agentName,
       content: {
         content: accumulatedState.content,
+        toolCalls: accumulatedState.toolCalls,
         finishReason: accumulatedState.finishReason || 'stop',
       },
       metadata: {
@@ -168,7 +208,7 @@ async function trackResponsesStream(
 // OpenAI Chat Completions endpoint
 app.post('/chat/completions', async (c) => {
   const auth = c.get('whyopsAuth') as ApiKeyAuthContext;
-  const requestBody = await c.req.json();
+  const requestBody = await c.req.json() as OpenAIChatCompletionRequest;
   const isStreaming = requestBody.stream === true;
 
   const startTime = Date.now();
@@ -242,7 +282,7 @@ app.post('/chat/completions', async (c) => {
   dispatchAnalyseEvent(auth.apiKey, {
     traceId,
     spanId: requestSpanId,
-    eventType: 'user_message',
+    eventType: determineOpenAIRequestEventType(requestBody.messages),
     providerId: provider.id,
     agentName,
     content: requestBody.messages,
@@ -252,7 +292,11 @@ app.post('/chat/completions', async (c) => {
       providerSlug: providerSlug || undefined,
       params: {
         temperature: requestBody.temperature,
-        maxTokens: requestBody.max_tokens,
+        maxTokens: (requestBody as any).max_tokens ?? requestBody.max_completion_tokens,
+        topP: requestBody.top_p,
+        frequencyPenalty: requestBody.frequency_penalty,
+        presencePenalty: requestBody.presence_penalty,
+        reasoningEffort: requestBody.reasoning_effort,
       }
     }
   });
@@ -407,7 +451,7 @@ app.post('/chat/completions', async (c) => {
       });
 
       const latencyMs = Date.now() - startTime;
-      const responseData = await response.json() as any;
+      const responseData = await response.json() as OpenAIChatCompletionResponse;
 
       if (!response.ok) {
         // ... error handling ...
@@ -448,6 +492,8 @@ app.post('/chat/completions', async (c) => {
       }
 
       const parsedResponse = OpenAIParser.parseResponse(responseData);
+      const annotations = OpenAIParser.extractChatAnnotations(responseData);
+      const refusal = OpenAIParser.extractChatRefusal(responseData);
       
       // Strip signature from content before saving to DB
       if (parsedResponse.content) {
@@ -465,6 +511,8 @@ app.post('/chat/completions', async (c) => {
           content: parsedResponse.content,
           toolCalls: parsedResponse.toolCalls, // Ensure tool calls are passed
           finishReason: parsedResponse.finishReason,
+          refusal,
+          annotations,
         },
         metadata: {
           model: requestBody.model,
@@ -498,7 +546,7 @@ app.post('/chat/completions', async (c) => {
 // OpenAI Responses endpoint
 app.post('/responses', async (c) => {
   const auth = c.get('whyopsAuth') as ApiKeyAuthContext;
-  const requestBody = await c.req.json();
+  const requestBody = await c.req.json() as OpenAIResponsesRequest;
   const isStreaming = requestBody.stream === true;
 
   const startTime = Date.now();
@@ -613,7 +661,7 @@ app.post('/responses', async (c) => {
 
     traceId,
     spanId: requestSpanId,
-    eventType: 'user_message',
+    eventType: determineResponsesRequestEventType(requestBody.input),
     providerId: provider.id,
     agentName,
     content: requestBody.input || requestBody.conversation, // Log input
@@ -623,6 +671,12 @@ app.post('/responses', async (c) => {
       providerSlug: providerSlug || undefined,
       params: {
         temperature: requestBody.temperature,
+        maxOutputTokens: requestBody.max_output_tokens,
+        topP: requestBody.top_p,
+        truncation: requestBody.truncation,
+        reasoning: requestBody.reasoning,
+        toolChoice: requestBody.tool_choice,
+        parallelToolCalls: requestBody.parallel_tool_calls,
       }
     }
   });
@@ -697,7 +751,7 @@ app.post('/responses', async (c) => {
       });
 
       const latencyMs = Date.now() - startTime;
-      const responseData = await response.json() as any;
+      const responseData = await response.json() as OpenAIResponsesResponse;
 
       if (!response.ok) {
         dispatchAnalyseEvent(auth.apiKey, {
@@ -776,6 +830,7 @@ app.post('/responses', async (c) => {
         agentName,
         content: {
           content: parsedResponse.content,
+          toolCalls: parsedResponse.toolCalls,
           finishReason: parsedResponse.finishReason,
         },
         metadata: {
