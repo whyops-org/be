@@ -156,7 +156,9 @@ export class AnthropicParser {
           if (existing) {
             existing.function.arguments = (existing.function.arguments || '') + data.delta.partial_json;
             toolCallState?.set(index, existing);
-            result.toolCalls = Array.from(toolCallState?.values());
+            result.toolCalls = toolCallState
+              ? Array.from(toolCallState.values())
+              : [existing];
           }
         }
         if (thinkingState) {

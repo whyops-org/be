@@ -23,14 +23,33 @@ export interface ParsedResponse {
 }
 
 export class OpenAIParser {
+  private static normalizeAssistantContent(
+    content: string | Array<{ type: string; text?: string }> | null | undefined
+  ): string | undefined {
+    if (typeof content === 'string') {
+      return content || undefined;
+    }
+    if (!Array.isArray(content)) {
+      return undefined;
+    }
+
+    const text = content
+      .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+      .map((part) => part.text as string)
+      .join('');
+
+    return text || undefined;
+  }
+
   /**
    * Parse a non-streaming response from OpenAI
    */
   static parseResponse(data: OpenAIChatCompletionResponse): ParsedResponse {
+    const message = data.choices?.[0]?.message;
     return {
-      content: data.choices?.[0]?.message?.content,
-      toolCalls: data.choices?.[0]?.message?.tool_calls,
-      finishReason: data.choices?.[0]?.finish_reason,
+      content: OpenAIParser.normalizeAssistantContent(message?.content as any),
+      toolCalls: message?.tool_calls ?? undefined,
+      finishReason: data.choices?.[0]?.finish_reason ?? undefined,
       usage: data.usage ? {
         promptTokens: data.usage.prompt_tokens,
         completionTokens: data.usage.completion_tokens,
@@ -42,7 +61,7 @@ export class OpenAIParser {
   }
 
   static extractChatAnnotations(data: OpenAIChatCompletionResponse): any[] | undefined {
-    const annotations = data.choices?.[0]?.message?.annotations;
+    const annotations = (data.choices?.[0]?.message as any)?.annotations;
     return annotations && annotations.length > 0 ? annotations : undefined;
   }
 
@@ -278,7 +297,9 @@ export class OpenAIParser {
       if (existing) {
         existing.function.arguments = event.arguments || existing.function.arguments;
         toolCallState?.set(event.item_id, existing);
-        result.toolCalls = Array.from(toolCallState?.values());
+        result.toolCalls = toolCallState
+          ? Array.from(toolCallState.values())
+          : [existing];
       }
     }
 
