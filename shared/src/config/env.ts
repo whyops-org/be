@@ -71,6 +71,13 @@ const envSchema = z.object({
   TRUSTED_ORIGINS: z.string().default('http://localhost:3000,http://localhost:5173'),
 
   COOKIE_DOMAIN: z.string().default('localhost'),
+
+  // LLM Judge Configuration (via LiteLLM proxy)
+  JUDGE_LLM_BASE_URL: z.string().default('https://litellm.whiteocean-2fb73b80.centralindia.azurecontainerapps.io/v1'),
+  JUDGE_LLM_API_KEY: z.string().optional(),
+  JUDGE_LLM_MODEL: z.string().default('azure/gpt-4.1'),
+  JUDGE_LLM_TEMPERATURE: z.coerce.number().default(0),
+  JUDGE_MAX_RETRIES: z.coerce.number().default(2),
 });
 
 export type Env = z.infer<typeof envSchema>;
