@@ -99,8 +99,6 @@ const envSchema = z.object({
   JUDGE_LLM_MODEL: z.string().default('azure/gpt-4.1'),
   JUDGE_LLM_TEMPERATURE: z.coerce.number().default(0),
   JUDGE_MAX_RETRIES: z.coerce.number().default(2),
-  RATE_LIMIT_WINDOW_MS: z.string().optional(),
-  PROXY_TIMEOUT_MS: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
