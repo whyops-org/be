@@ -76,3 +76,70 @@ export function parseDatabaseUrl(url: string) {
     password: parsed.password,
   };
 }
+
+const LOCAL_DB_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+function isLocalDbHost(host?: string): boolean {
+  if (!host) return true;
+  return LOCAL_DB_HOSTS.has(host.toLowerCase());
+}
+
+function parseSslMode(databaseUrl?: string): string | undefined {
+  if (!databaseUrl) return undefined;
+  try {
+    const parsed = new URL(databaseUrl);
+    return parsed.searchParams.get('sslmode')?.toLowerCase() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function shouldUseDbSsl(params: {
+  databaseUrl?: string;
+  dbHost?: string;
+  explicitSsl?: boolean;
+}): boolean {
+  const { databaseUrl, dbHost, explicitSsl } = params;
+
+  if (typeof explicitSsl === 'boolean') {
+    return explicitSsl;
+  }
+
+  const sslMode = parseSslMode(databaseUrl);
+  if (sslMode === 'disable') return false;
+  if (sslMode === 'require' || sslMode === 'verify-ca' || sslMode === 'verify-full') {
+    return true;
+  }
+
+  let host = dbHost;
+  if (!host && databaseUrl) {
+    try {
+      host = new URL(databaseUrl).hostname;
+    } catch {
+      host = undefined;
+    }
+  }
+
+  return !isLocalDbHost(host);
+}
+
+export function buildPgSslConfig(params: {
+  databaseUrl?: string;
+  dbHost?: string;
+  explicitSsl?: boolean;
+  rejectUnauthorized?: boolean;
+}): false | { rejectUnauthorized: boolean } {
+  const enabled = shouldUseDbSsl({
+    databaseUrl: params.databaseUrl,
+    dbHost: params.dbHost,
+    explicitSsl: params.explicitSsl,
+  });
+
+  if (!enabled) {
+    return false;
+  }
+
+  return {
+    rejectUnauthorized: params.rejectUnauthorized ?? false,
+  };
+}

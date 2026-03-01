@@ -1,12 +1,36 @@
 import env from '@whyops/shared/env';
 import { createServiceLogger } from '@whyops/shared/logger';
 import { ApiKey, Entity, Environment, Project, Provider } from '@whyops/shared/models';
+import {
+  cacheApiKeyAuthContext,
+  claimRedisThrottleGate,
+  getCachedApiKeyAuthContext,
+  prefixedRedisKey,
+} from '@whyops/shared/services';
 import { hashApiKey } from '@whyops/shared/utils';
 import type { Context } from 'hono';
 import { getCookie } from 'hono/cookie';
 import type { ApiKeyAuthContext, SessionAuthContext, SessionUser, UserSession } from './types';
 
 const logger = createServiceLogger('auth:utils');
+
+async function touchApiKeyLastUsed(apiKeyId: string): Promise<void> {
+  try {
+    const shouldWrite = await claimRedisThrottleGate(
+      prefixedRedisKey('auth', 'apikey', 'last-used', apiKeyId),
+      env.APIKEY_LAST_USED_WRITE_INTERVAL_SEC
+    );
+
+    if (!shouldWrite) return;
+
+    ApiKey.update(
+      { lastUsedAt: new Date() },
+      { where: { id: apiKeyId } }
+    ).catch((err) => logger.error({ err, apiKeyId }, 'Failed to update lastUsedAt'));
+  } catch (error) {
+    logger.warn({ error, apiKeyId }, 'Failed to schedule lastUsedAt update');
+  }
+}
 
 export interface BetterAuthSession {
   user: {
@@ -106,6 +130,25 @@ export async function validateApiKey(
 
   try {
     const keyHash = hashApiKey(apiKey);
+    const cached = await getCachedApiKeyAuthContext(keyHash);
+
+    if (cached?.cacheVersion === 1 && cached.context) {
+      if (cached.expiresAt && new Date() > new Date(cached.expiresAt)) {
+        return { valid: false, error: 'API key expired' };
+      }
+
+      const context = {
+        ...(cached.context as unknown as Omit<ApiKeyAuthContext, 'apiKey'>),
+        apiKey,
+      } satisfies ApiKeyAuthContext;
+
+      void touchApiKeyLastUsed(context.apiKeyId);
+
+      return {
+        valid: true,
+        context,
+      };
+    }
 
     const apiKeyRecord = await ApiKey.findOne({
       where: {
@@ -139,30 +182,38 @@ export async function validateApiKey(
       return { valid: false, error: 'Environment is not active' };
     }
 
-    ApiKey.update(
-      { lastUsedAt: new Date() },
-      { where: { id: apiKeyRecord.id } }
-    ).catch((err) => logger.error({ err }, 'Failed to update lastUsedAt'));
+    const context: ApiKeyAuthContext = {
+      authType: 'api_key',
+      apiKey,
+      userId: apiKeyRecord.userId,
+      projectId: apiKeyRecord.projectId,
+      environmentId: apiKeyRecord.environmentId,
+      providerId: apiKeyRecord.providerId ?? undefined,
+      entityId: apiKeyRecord.entityId ?? undefined,
+      isMaster: apiKeyRecord.isMaster,
+      apiKeyId: apiKeyRecord.id,
+      apiKeyPrefix: apiKeyRecord.keyPrefix,
+      environmentName: environment.name,
+      project,
+      environment,
+      provider: (apiKeyRecord as any).provider,
+      entity: (apiKeyRecord as any).entity,
+    };
+
+    const { apiKey: _apiKey, ...cacheableContext } = context;
+    await cacheApiKeyAuthContext({
+      cacheVersion: 1,
+      apiKeyId: apiKeyRecord.id,
+      keyHash,
+      expiresAt: apiKeyRecord.expiresAt ? apiKeyRecord.expiresAt.toISOString() : null,
+      context: cacheableContext as unknown as Record<string, unknown>,
+    });
+
+    void touchApiKeyLastUsed(apiKeyRecord.id);
 
     return {
       valid: true,
-      context: {
-        authType: 'api_key',
-        apiKey,
-        userId: apiKeyRecord.userId,
-        projectId: apiKeyRecord.projectId,
-        environmentId: apiKeyRecord.environmentId,
-        providerId: apiKeyRecord.providerId ?? undefined,
-        entityId: apiKeyRecord.entityId ?? undefined,
-        isMaster: apiKeyRecord.isMaster,
-        apiKeyId: apiKeyRecord.id,
-        apiKeyPrefix: apiKeyRecord.keyPrefix,
-        environmentName: environment.name,
-        project,
-        environment,
-        provider: (apiKeyRecord as any).provider,
-        entity: (apiKeyRecord as any).entity,
-      },
+      context,
     };
   } catch (error) {
     logger.error({ error }, 'Failed to validate API key');

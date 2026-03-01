@@ -1,6 +1,6 @@
 import { Sequelize } from 'sequelize';
 import env from '../config/env';
-import { parseDatabaseUrl } from '../utils/helpers';
+import { buildPgSslConfig, parseDatabaseUrl } from '../utils/helpers';
 import logger from '../utils/logger';
 
 let dbConfig: any;
@@ -32,11 +32,13 @@ export const sequelize = new Sequelize({
     // which can happen when schema changes or with connection pooling issues in some environments.
     // This forces pg to use simple queries.
     binary: false,
-    // ssl: {
-    //       require: true,
-    //       rejectUnauthorized: false,
-    //     },
-    // ssl: env.DB_SSL ? { rejectUnauthorized: false } : undefined, // Removed as DB_SSL is not in env type
+    ssl:
+      buildPgSslConfig({
+        databaseUrl: env.DATABASE_URL,
+        dbHost: dbConfig.host,
+        explicitSsl: env.DB_SSL,
+        rejectUnauthorized: env.DB_SSL_REJECT_UNAUTHORIZED,
+      }) || undefined,
   },
   logging: env.NODE_ENV === 'development' ? (msg) => logger.debug(msg) : false,
   pool: {

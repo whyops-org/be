@@ -42,7 +42,7 @@ export async function up(queryInterface: QueryInterface): Promise<void> {
         primaryKey: true,
       },
       user_id: {
-        type: DataTypes.UUID,
+        type: DataTypes.STRING,
         allowNull: false,
         references: {
           model: 'users',

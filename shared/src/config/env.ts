@@ -22,6 +22,8 @@ const envSchema = z.object({
   DB_NAME: z.string().default('whyops'),
   DB_USER: z.string().default('postgres'),
   DB_PASSWORD: z.string().default('postgres'),
+  DB_SSL: z.coerce.boolean().optional(),
+  DB_SSL_REJECT_UNAUTHORIZED: z.coerce.boolean().default(false),
   DB_POOL_MAX: z.coerce.number().default(20),
   DB_POOL_MIN: z.coerce.number().default(5),
   
@@ -49,6 +51,25 @@ const envSchema = z.object({
   // Proxy specific
   PROXY_TIMEOUT_MS: z.coerce.number().default(60000), // 60 seconds
   PROXY_MAX_RETRIES: z.coerce.number().default(3),
+
+  // Redis (optional, for queue/cache/rate-limit)
+  REDIS_URL: z.string().optional(),
+  REDIS_KEY_PREFIX: z.string().default('whyops'),
+
+  // Queue configuration
+  EVENTS_STREAM_NAME: z.string().default('whyops:events'),
+  EVENTS_DLQ_STREAM_NAME: z.string().default('whyops:events:dlq'),
+  EVENTS_STREAM_GROUP: z.string().default('whyops-analyse-workers'),
+  EVENTS_STREAM_MAX_LEN: z.coerce.number().default(200000),
+  EVENTS_STREAM_BATCH_SIZE: z.coerce.number().default(100),
+  EVENTS_STREAM_BLOCK_MS: z.coerce.number().default(2000),
+  EVENTS_STREAM_RETRY_MAX: z.coerce.number().default(5),
+  EVENTS_WORKER_ENABLED: z.coerce.boolean().default(true),
+
+  // Cache configuration
+  AUTH_APIKEY_CACHE_TTL_SEC: z.coerce.number().default(60),
+  PROVIDER_CACHE_TTL_SEC: z.coerce.number().default(60),
+  APIKEY_LAST_USED_WRITE_INTERVAL_SEC: z.coerce.number().default(300),
   
   // Better Auth
   BETTER_AUTH_URL: z.string().url().default('http://localhost:8082'),
@@ -78,6 +99,8 @@ const envSchema = z.object({
   JUDGE_LLM_MODEL: z.string().default('azure/gpt-4.1'),
   JUDGE_LLM_TEMPERATURE: z.coerce.number().default(0),
   JUDGE_MAX_RETRIES: z.coerce.number().default(2),
+  RATE_LIMIT_WINDOW_MS: z.string().optional(),
+  PROXY_TIMEOUT_MS: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

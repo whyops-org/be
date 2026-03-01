@@ -4,10 +4,20 @@ const fs = require('fs');
 const path = require('path');
 
 function parseArgs(argv) {
-  const args = { key: '', value: '' };
+  const args = {
+    key: '',
+    value: '',
+    file: '',
+    help: false,
+  };
 
   for (let i = 0; i < argv.length; i += 1) {
     const current = argv[i];
+
+    if (current === '-h' || current === '--help') {
+      args.help = true;
+      continue;
+    }
 
     if (current === '-k' || current === '--key') {
       args.key = argv[i + 1] || '';
@@ -17,6 +27,12 @@ function parseArgs(argv) {
 
     if (current === '-v' || current === '--value') {
       args.value = argv[i + 1] || '';
+      i += 1;
+      continue;
+    }
+
+    if (current === '-f' || current === '--file') {
+      args.file = argv[i + 1] || '';
       i += 1;
       continue;
     }
@@ -66,7 +82,7 @@ function ensureEnvExampleKey(content, key) {
   return `${normalized}${key}=\n`;
 }
 
-function upsertEnvSchema(content, key) {
+function upsertEnvSchema(content, keys) {
   const schemaBlockPattern = /const envSchema = z\.object\(\{([\s\S]*?)\n\}\);/;
   const match = content.match(schemaBlockPattern);
 
@@ -74,20 +90,67 @@ function upsertEnvSchema(content, key) {
     throw new Error('Could not find envSchema object in shared/src/config/env.ts');
   }
 
-  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const fieldPattern = new RegExp(`^\\s*${escapedKey}:\\s*.*,$`, 'm');
-  const schemaField = `  ${key}: z.string().optional(),`;
-
   const objectBody = match[1];
-  let updatedBody;
+  let updatedBody = objectBody;
 
-  if (fieldPattern.test(objectBody)) {
-    return content;
+  for (const key of keys) {
+    const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const fieldPattern = new RegExp(`^\\s*${escapedKey}:\\s*.*,$`, 'm');
+    const schemaField = `  ${key}: z.string().optional(),`;
+
+    if (!fieldPattern.test(updatedBody)) {
+      updatedBody = `${updatedBody}\n${schemaField}`;
+    }
   }
 
-  updatedBody = `${objectBody}\n${schemaField}`;
-
   return content.replace(schemaBlockPattern, `const envSchema = z.object({${updatedBody}\n});`);
+}
+
+function parseEnvLines(content) {
+  const lines = content.split(/\r?\n/);
+  const parsed = [];
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+
+    const withoutExport = line.startsWith('export ') ? line.slice(7).trim() : line;
+    const match = withoutExport.match(/^([A-Z][A-Z0-9_]*)\s*=\s*(.*)$/);
+    if (!match) {
+      continue;
+    }
+
+    const key = match[1];
+    const value = match[2];
+    if (!validateEnvKey(key)) {
+      continue;
+    }
+
+    parsed.push({ key, value });
+  }
+
+  return parsed;
+}
+
+function printHelp() {
+  console.log(`
+Usage:
+  bun run env-add -- -k KEY -v VALUE
+  bun run env-add -- -f /path/to/source.env
+
+Options:
+  -k, --key      Single env key (uppercase style)
+  -v, --value    Value for single key
+  -f, --file     Source env file to bulk sync
+  -h, --help     Show this help
+
+Behavior:
+  - Updates/appends keys in .env
+  - Ensures keys exist in .env.example (empty value)
+  - Ensures keys exist in shared/src/config/env.ts as z.string().optional()
+`.trim());
 }
 
 function writeFile(filePath, content) {
@@ -95,15 +158,19 @@ function writeFile(filePath, content) {
 }
 
 function main() {
-  const { key, value } = parseArgs(process.argv.slice(2));
+  const { key, value, file, help } = parseArgs(process.argv.slice(2));
 
-  if (!key || value === '') {
-    console.error('Usage: bun run env-add -- -k KEY -v VALUE');
-    process.exit(1);
+  if (help) {
+    printHelp();
+    process.exit(0);
   }
 
-  if (!validateEnvKey(key)) {
-    console.error('Invalid key. Use uppercase environment variable style, e.g. MY_NEW_KEY');
+  const hasSingle = Boolean(key) || value !== '';
+  const hasFile = Boolean(file);
+
+  if ((hasSingle && hasFile) || (!hasSingle && !hasFile)) {
+    console.error('Use either -k/-v for single key, or -f for bulk file sync.');
+    console.error('Run: bun run env-add -- --help');
     process.exit(1);
   }
 
@@ -116,15 +183,58 @@ function main() {
   const envExampleContent = readIfExists(envExamplePath);
   const envTsContent = readIfExists(envTsPath);
 
-  const updatedEnv = upsertEnvKeyValue(envContent, key, value);
-  const updatedEnvExample = ensureEnvExampleKey(envExampleContent, key);
-  const updatedEnvTs = upsertEnvSchema(envTsContent, key);
+  let pairs = [];
+
+  if (hasFile) {
+    const sourcePath = path.isAbsolute(file) ? file : path.join(root, file);
+    if (!fs.existsSync(sourcePath)) {
+      console.error(`Source env file not found: ${sourcePath}`);
+      process.exit(1);
+    }
+
+    const sourceContent = readIfExists(sourcePath);
+    pairs = parseEnvLines(sourceContent);
+    if (pairs.length === 0) {
+      console.error('No valid env key/value pairs found in source file.');
+      process.exit(1);
+    }
+  } else {
+    if (!key || value === '') {
+      console.error('Usage: bun run env-add -- -k KEY -v VALUE');
+      process.exit(1);
+    }
+
+    if (!validateEnvKey(key)) {
+      console.error('Invalid key. Use uppercase environment variable style, e.g. MY_NEW_KEY');
+      process.exit(1);
+    }
+
+    pairs = [{ key, value }];
+  }
+
+  let updatedEnv = envContent;
+  let updatedEnvExample = envExampleContent;
+  const keys = [];
+
+  for (const pair of pairs) {
+    updatedEnv = upsertEnvKeyValue(updatedEnv, pair.key, pair.value);
+    updatedEnvExample = ensureEnvExampleKey(updatedEnvExample, pair.key);
+    if (!keys.includes(pair.key)) {
+      keys.push(pair.key);
+    }
+  }
+
+  const updatedEnvTs = upsertEnvSchema(envTsContent, keys);
 
   writeFile(envPath, updatedEnv);
   writeFile(envExamplePath, updatedEnvExample);
   writeFile(envTsPath, updatedEnvTs);
 
-  console.log(`Added/updated ${key} in .env, .env.example, and shared/src/config/env.ts`);
+  if (hasFile) {
+    console.log(`Synced ${keys.length} keys from ${file} into .env, .env.example, and shared/src/config/env.ts`);
+  } else {
+    console.log(`Added/updated ${key} in .env, .env.example, and shared/src/config/env.ts`);
+  }
 }
 
 main();

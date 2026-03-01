@@ -10,6 +10,7 @@
   ],
   "scripts": {
     "env-add": "bun scripts/env-add.js",
+    "env-gh-secret-sync": "bun scripts/env-gh-secret-sync.js",
     "dev": "concurrently \"bun run dev:proxy\" \"bun run dev:analyse\" \"bun run dev:auth\"",
     "dev:proxy": "cd whyops-proxy && bun run dev",
     "dev:analyse": "cd whyops-analyse && bun run dev",

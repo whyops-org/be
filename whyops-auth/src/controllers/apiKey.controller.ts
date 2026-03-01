@@ -1,4 +1,6 @@
 import { createServiceLogger } from '@whyops/shared/logger';
+import { invalidateApiKeyAuthCacheByHash, invalidateApiKeyAuthCacheById } from '@whyops/shared/services';
+import { hashApiKey } from '@whyops/shared/utils';
 import { Context } from 'hono';
 import { ApiKeyService, CreateApiKeyData, UpdateApiKeyData } from '../services';
 import { ResponseUtil } from '../utils';
@@ -89,6 +91,11 @@ export class ApiKeyController {
         expiresAt: data.expiresAt ? new Date(data.expiresAt) : undefined,
       } as CreateApiKeyData);
 
+      await invalidateApiKeyAuthCacheById(apiKeyRecord.id);
+      if (apiKeyRecord.apiKey) {
+        await invalidateApiKeyAuthCacheByHash(hashApiKey(apiKeyRecord.apiKey));
+      }
+
       return ResponseUtil.created(c, {
         id: apiKeyRecord.id,
         name: apiKeyRecord.name,
@@ -151,6 +158,7 @@ export class ApiKeyController {
       }
       
       const apiKey = await ApiKeyService.updateApiKey(id, user.id, data);
+      await invalidateApiKeyAuthCacheById(id);
 
       return ResponseUtil.success(c, {
         id: apiKey.id,
@@ -179,6 +187,7 @@ export class ApiKeyController {
       const id = c.req.param('id');
       
       await ApiKeyService.deleteApiKey(id, user.id);
+      await invalidateApiKeyAuthCacheById(id);
 
       return ResponseUtil.success(c, { message: 'API key revoked' });
     } catch (error: any) {
@@ -201,6 +210,7 @@ export class ApiKeyController {
       const id = c.req.param('id');
       
       const isActive = await ApiKeyService.toggleApiKey(id, user.id);
+      await invalidateApiKeyAuthCacheById(id);
 
       return ResponseUtil.success(c, { isActive });
     } catch (error: any) {
@@ -223,6 +233,8 @@ export class ApiKeyController {
       const id = c.req.param('id');
 
       const regenerated = await ApiKeyService.regenerateApiKey(id, user.id);
+      await invalidateApiKeyAuthCacheById(id);
+      await invalidateApiKeyAuthCacheByHash(hashApiKey(regenerated.apiKey));
 
       return ResponseUtil.success(c, {
         ...regenerated,

@@ -1,6 +1,7 @@
 import type { ApiKeyAuthContext } from '@whyops/shared/middleware';
 import type { Context, Next } from 'hono';
 import { createServiceLogger } from '@whyops/shared/logger';
+import { checkRedisFixedWindowRateLimit, prefixedRedisKey } from '@whyops/shared/services';
 import env from '@whyops/shared/env';
 
 const logger = createServiceLogger('proxy:ratelimit');
@@ -17,6 +18,37 @@ export async function rateLimitMiddleware(c: Context, next: Next) {
   const now = Date.now();
   const windowMs = env.RATE_LIMIT_WINDOW_MS;
   const maxRequests = env.RATE_LIMIT_MAX_REQUESTS;
+
+  const redisResult = await checkRedisFixedWindowRateLimit(
+    prefixedRedisKey('ratelimit', auth.apiKeyId),
+    maxRequests,
+    windowMs
+  );
+
+  if (redisResult) {
+    c.header('X-RateLimit-Limit', maxRequests.toString());
+    c.header('X-RateLimit-Remaining', redisResult.remaining.toString());
+    c.header('X-RateLimit-Reset', new Date(redisResult.resetAtEpochMs).toISOString());
+    c.header('X-RateLimit-Backend', 'redis');
+
+    if (!redisResult.allowed) {
+      logger.warn(
+        { apiKeyId: auth.apiKeyId, count: redisResult.count, source: redisResult.source },
+        'Rate limit exceeded'
+      );
+      return c.json(
+        {
+          error: 'Rate limit exceeded',
+          message: `Too many requests. Limit: ${maxRequests} requests per ${windowMs / 1000} seconds`,
+          retryAfter: new Date(redisResult.resetAtEpochMs).toISOString(),
+        },
+        429
+      );
+    }
+
+    await next();
+    return;
+  }
 
   let record = rateLimitStore.get(key);
 
@@ -35,6 +67,7 @@ export async function rateLimitMiddleware(c: Context, next: Next) {
   c.header('X-RateLimit-Limit', maxRequests.toString());
   c.header('X-RateLimit-Remaining', Math.max(0, maxRequests - record.count).toString());
   c.header('X-RateLimit-Reset', new Date(record.resetAt).toISOString());
+  c.header('X-RateLimit-Backend', 'memory');
 
   if (record.count > maxRequests) {
     logger.warn(

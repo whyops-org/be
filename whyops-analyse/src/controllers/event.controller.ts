@@ -1,11 +1,60 @@
 import { createServiceLogger } from '@whyops/shared/logger';
 import { Context } from 'hono';
 import { EventData, EventService } from '../services';
+import { enqueueAnalyseEventPayload } from '../services/events-queue.service';
 import { parseInclude } from '../utils/query';
 
 const logger = createServiceLogger('analyse:event-controller');
 
 export class EventController {
+  static async enqueueEvent(c: Context) {
+    const auth = c.get('whyopsAuth');
+    if (!auth) {
+      return c.json({ error: 'Unauthorized: authentication required' }, 401);
+    }
+
+    const data = (c.req as any).parsedData || await c.req.json();
+
+    try {
+      if (Array.isArray(data)) {
+        let queuedCount = 0;
+        for (const item of data) {
+          const queued = await enqueueAnalyseEventPayload(item, auth);
+          if (queued) queuedCount += 1;
+        }
+
+        if (queuedCount === data.length) {
+          return c.json(
+            {
+              success: true,
+              accepted: true,
+              queuedCount,
+            },
+            202
+          );
+        }
+      } else {
+        const queued = await enqueueAnalyseEventPayload(data, auth);
+        if (queued) {
+          return c.json(
+            {
+              success: true,
+              accepted: true,
+              queuedCount: 1,
+            },
+            202
+          );
+        }
+      }
+
+      // Queue unavailable fallback to direct processing.
+      return await EventController.createEvent(c);
+    } catch (error: any) {
+      logger.error({ error }, 'Failed to enqueue event(s)');
+      return c.json({ error: 'Failed to enqueue event(s)' }, 500);
+    }
+  }
+
   /**
    * Create a new event or batch of events
    */

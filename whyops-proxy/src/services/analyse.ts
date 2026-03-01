@@ -1,5 +1,6 @@
 import env from '@whyops/shared/env';
 import { createServiceLogger } from '@whyops/shared/logger';
+import { enqueueRedisStreamEvent } from '@whyops/shared/services';
 
 const logger = createServiceLogger('proxy:analyse');
 
@@ -32,7 +33,34 @@ export async function sendToAnalyse(
   payload: TraceEventPayload
 ): Promise<void> {
   try {
-    const analyseUrl = `${env.ANALYSE_URL}/api/events`;
+    const queued = await enqueueRedisStreamEvent(
+      env.EVENTS_STREAM_NAME,
+      {
+        apiKey,
+        payload: {
+          ...payload,
+          timestamp: payload.timestamp || new Date().toISOString(),
+        },
+        source: 'proxy',
+        retryCount: 0,
+        enqueuedAt: new Date().toISOString(),
+      },
+      { maxLen: env.EVENTS_STREAM_MAX_LEN }
+    );
+
+    if (queued.queued) {
+      logger.debug(
+        {
+          traceId: payload.traceId,
+          eventType: payload.eventType,
+          messageId: queued.messageId,
+        },
+        'Event queued to Redis stream'
+      );
+      return;
+    }
+
+    const analyseUrl = `${env.ANALYSE_URL}/api/events/ingest`;
 
     // Fire-and-forget request - only forward API key
     fetch(analyseUrl, {

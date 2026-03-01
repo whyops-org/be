@@ -14,11 +14,13 @@ import healthRouter from './routes/health';
 import llmCostsRouter from './routes/llmCosts';
 import threadsRouter from './routes/threads';
 import visualizeRouter from './routes/visualize';
+import { startAnalyseEventsWorker } from './services/events-queue.service';
 
 const logger = createServiceLogger('analyse');
 const app = new Hono();
 
 await initDatabase();
+await startAnalyseEventsWorker();
 
 app.use('*', honoLogger());
 app.use('*', cors(getIntegrationCorsOptions()));

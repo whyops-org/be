@@ -129,6 +129,38 @@ app.post(
 
 // POST /api/events - Create a new event (or batch of events)
 app.post(
+  '/ingest',
+  zValidator('json', batchEventSchema, (result, c) => {
+    if (!result.success) {
+      const errors = result.error.errors.map((e) => ({
+        field: e.path.join('.'),
+        message: e.message,
+        code: e.code,
+      }));
+      logger.warn({ errors }, 'Event ingestion validation failed');
+      return c.json({ error: 'Validation failed', details: errors }, 400);
+    }
+  }),
+  async (c) => {
+    const data = await c.req.json();
+    const auth = c.get('whyopsAuth');
+
+    const headers = {
+      userId: c.req.header('X-User-Id'),
+      projectId: c.req.header('X-Project-Id'),
+      environmentId: c.req.header('X-Environment-Id'),
+      providerId: c.req.header('X-Provider-Id'),
+    };
+
+    const processedData = processEventData(data, auth, headers);
+    (c as any).req.parsedData = processedData;
+
+    return EventController.enqueueEvent(c);
+  }
+);
+
+// POST /api/events - Create a new event (or batch of events)
+app.post(
   '/',
   zValidator('json', batchEventSchema, (result, c) => {
     if (!result.success) {

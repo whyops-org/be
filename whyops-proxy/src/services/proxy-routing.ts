@@ -1,5 +1,6 @@
 import { createServiceLogger } from '@whyops/shared/logger';
 import { Provider } from '@whyops/shared/models';
+import { cacheProvider, getCachedProvider } from '@whyops/shared/services';
 import { decrypt } from '@whyops/shared/utils';
 
 const logger = createServiceLogger('proxy:routing');
@@ -98,6 +99,17 @@ export async function getProviderBySlugOrDefault(
     return { provider: normalizeProvider(defaultProvider), isCustom: false };
   }
 
+  const cachedProvider = await getCachedProvider<any>(userId, providerSlug);
+  if (cachedProvider.hit) {
+    if (cachedProvider.provider) {
+      return {
+        provider: normalizeProvider(cachedProvider.provider),
+        isCustom: true,
+      };
+    }
+    return { provider: normalizeProvider(defaultProvider), isCustom: false };
+  }
+
   const provider = await Provider.findOne({
     where: {
       userId,
@@ -107,6 +119,7 @@ export async function getProviderBySlugOrDefault(
   });
 
   if (provider) {
+    await cacheProvider(userId, providerSlug, provider.toJSON());
     return {
       provider: normalizeProvider(provider),
       isCustom: true,
@@ -114,6 +127,7 @@ export async function getProviderBySlugOrDefault(
   }
 
   logger.warn({ providerSlug }, 'Provider slug not found, using default');
+  await cacheProvider(userId, providerSlug, null);
   return { provider: normalizeProvider(defaultProvider), isCustom: false };
 }
 

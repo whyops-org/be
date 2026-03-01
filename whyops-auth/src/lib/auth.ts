@@ -1,5 +1,5 @@
 import env, { getTrustedOrigins } from '@whyops/shared/env';
-import { logger } from '@whyops/shared/utils';
+import { buildPgSslConfig, logger } from '@whyops/shared/utils';
 import { betterAuth } from 'better-auth';
 import { createAuthMiddleware } from 'better-auth/api';
 import { magicLink } from 'better-auth/plugins';
@@ -14,6 +14,11 @@ const db = new Kysely({
       connectionString: env.DATABASE_URL,
       max: env.DB_POOL_MAX,
       min: env.DB_POOL_MIN,
+      ssl: buildPgSslConfig({
+        databaseUrl: env.DATABASE_URL,
+        explicitSsl: env.DB_SSL,
+        rejectUnauthorized: env.DB_SSL_REJECT_UNAUTHORIZED,
+      }),
     }),
   }),
 });

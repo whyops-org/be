@@ -1,5 +1,6 @@
 import env from '@whyops/shared/env';
 import { createServiceLogger } from '@whyops/shared/logger';
+import { buildPgSslConfig } from '@whyops/shared/utils';
 import { getMigrations } from 'better-auth/db';
 import { Hono } from 'hono';
 import { Kysely, PostgresDialect } from 'kysely';
@@ -13,6 +14,11 @@ const db = new Kysely({
   dialect: new PostgresDialect({
     pool: new Pool({
       connectionString: env.DATABASE_URL,
+      ssl: buildPgSslConfig({
+        databaseUrl: env.DATABASE_URL,
+        explicitSsl: env.DB_SSL,
+        rejectUnauthorized: env.DB_SSL_REJECT_UNAUTHORIZED,
+      }),
     }),
   }),
 });
