@@ -66,5 +66,6 @@ logger.info(`🚀 WhyOps Analyse Server starting on port ${port}`);
 
 export default {
   port,
+  idleTimeout: 120,
   fetch: app.fetch,
 };

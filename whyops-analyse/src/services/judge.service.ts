@@ -24,6 +24,11 @@ import {
   isInvalidModelNameError,
 } from '../langchain';
 import env from '@whyops/shared/env';
+import {
+  createJudgeCheckpointEmitter,
+  type JudgeCheckpointEmitter,
+  type JudgeCheckpointHandler,
+} from './judge-checkpoints';
 
 const logger = createServiceLogger('analyse:judge-service');
 
@@ -51,6 +56,7 @@ export interface RunJudgeInput {
   dimensions?: JudgeDimension[];
   judgeModel?: string;
   mode?: 'quick' | 'standard' | 'deep';
+  onCheckpoint?: JudgeCheckpointHandler<JudgeResult>;
 }
 
 type JudgeMode = 'quick' | 'standard' | 'deep';
@@ -386,6 +392,50 @@ function chunkEvents(events: LLMEvent[], chunkSize: number): LLMEvent[][] {
   return chunks;
 }
 
+async function runWithCheckpointHeartbeat<T>(args: {
+  checkpoints: JudgeCheckpointEmitter<JudgeResult>;
+  key: string;
+  run: () => Promise<T>;
+  intervalMs?: number;
+  startedData?: Record<string, unknown>;
+}): Promise<T> {
+  const { checkpoints, key, run, intervalMs = 5000, startedData } = args;
+  const startedAt = Date.now();
+  let done = false;
+  let heartbeatCount = 0;
+
+  await checkpoints.checkpoint(`${key}.started`, startedData);
+
+  const timer = setInterval(() => {
+    if (done) return;
+    heartbeatCount += 1;
+    void checkpoints.checkpoint(`${key}.heartbeat`, {
+      heartbeatCount,
+      elapsedMs: Date.now() - startedAt,
+    });
+  }, intervalMs);
+
+  try {
+    const result = await run();
+    done = true;
+    clearInterval(timer);
+    await checkpoints.checkpoint(`${key}.completed`, {
+      durationMs: Date.now() - startedAt,
+      heartbeatCount,
+    });
+    return result;
+  } catch (error: any) {
+    done = true;
+    clearInterval(timer);
+    await checkpoints.checkpoint(`${key}.failed`, {
+      durationMs: Date.now() - startedAt,
+      heartbeatCount,
+      errorMessage: error?.message || "unknown error",
+    });
+    throw error;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main Judge Service
 // ---------------------------------------------------------------------------
@@ -400,32 +450,104 @@ export class JudgeService {
       dimensions = ALL_DIMENSIONS,
       judgeModel = env.JUDGE_LLM_MODEL,
       mode,
+      onCheckpoint,
     } = input;
     const judgeMode = resolveJudgeMode(mode);
     const executionProfile = JUDGE_MODE_PROFILES[judgeMode];
 
     const now = new Date();
+    const dimensionResults: DimensionScore[] = [];
+    const allFindings: any[] = [];
+    const severityCounts: Record<string, number> = {};
+    let analysis: TraceAnalysis | null = null;
+    let snapshotStatus: 'running' | 'completed' | 'failed' = 'running';
+
+    const buildSummary = () => {
+      const scoredDimensions = dimensionResults.filter((d) => !d.skipped);
+      const overallScore =
+        scoredDimensions.length > 0
+          ? Math.round(
+              (scoredDimensions.reduce((s, d) => s + d.score, 0) / scoredDimensions.length) * 100
+            ) / 100
+          : 0;
+
+      const dimensionScores: Record<string, number> = {};
+      for (const dim of dimensions) {
+        dimensionScores[dim] = -1;
+      }
+      for (const d of dimensionResults) {
+        dimensionScores[d.dimension] = d.skipped ? -1 : Math.round(d.score * 100) / 100;
+      }
+
+      const totalIssues = dimensionResults.reduce((s, d) => s + d.issueCount, 0);
+      const totalPatches = dimensionResults.reduce((s, d) => s + d.patchCount, 0);
+
+      return {
+        overallScore,
+        dimensionScores,
+        totalIssues,
+        totalPatches,
+        bySeverity: severityCounts,
+        dimensionDetails: dimensionResults,
+      };
+    };
+
+    const buildSnapshot = (
+      status: 'running' | 'completed' | 'failed' = snapshotStatus
+    ): JudgeResult => {
+      return {
+        id: analysis?.id || 'pending',
+        traceId,
+        status,
+        rubricVersion: 'judge-v1',
+        judgeModel,
+        mode: judgeMode,
+        summary: buildSummary(),
+        findings: status === 'completed' ? allFindings : [],
+      };
+    };
+
+    const checkpoints = createJudgeCheckpointEmitter<JudgeResult>({
+      handler: onCheckpoint,
+      getSnapshot: () => buildSnapshot(),
+    });
 
     // ---- Validate judge is configured ----
     if (!env.JUDGE_LLM_API_KEY) {
       throw new Error('JUDGE_NOT_CONFIGURED');
     }
+    await checkpoints.checkpoint('request.accepted', {
+      traceId,
+      mode: judgeMode,
+      dimensions,
+      judgeModel,
+    });
 
     // ---- Load trace ----
+    await checkpoints.checkpoint('trace.load.started');
     const trace = await Trace.findOne({
       where: { id: traceId, userId },
       attributes: ['id', 'userId', 'entityId', 'model', 'systemMessage', 'tools', 'metadata', 'sampledIn'],
     });
 
     if (!trace) throw new Error('TRACE_NOT_FOUND');
+    await checkpoints.checkpoint('trace.load.completed', {
+      traceId: trace.id,
+      hasEntityId: Boolean(trace.entityId),
+    });
 
     // ---- Load entity for metadata (system prompt, tools) ----
     let entityMetadata: Record<string, any> = {};
     if (trace.entityId) {
+      await checkpoints.checkpoint('entity.load.started', { entityId: trace.entityId });
       const entity = await Entity.findByPk(trace.entityId, {
         attributes: ['id', 'name', 'metadata'],
       });
       if (entity) entityMetadata = entity.metadata || {};
+      await checkpoints.checkpoint('entity.load.completed', {
+        entityId: trace.entityId,
+        found: Boolean(entity),
+      });
     }
 
     // ---- Resolve system prompt & tools ----
@@ -439,8 +561,13 @@ export class JudgeService {
       trace.tools ||
       entityMetadata.tools ||
       [];
+    await checkpoints.checkpoint('trace.context.resolved', {
+      hasSystemPrompt: systemPrompt.length > 0,
+      toolCount: tools.length,
+    });
 
     // ---- Load events ----
+    await checkpoints.checkpoint('events.load.started');
     const events = await LLMEvent.findAll({
       where: { traceId, userId },
       attributes: [
@@ -452,8 +579,12 @@ export class JudgeService {
         ['stepId', 'ASC'],
       ],
     });
+    await checkpoints.checkpoint('events.load.completed', {
+      eventCount: events.length,
+    });
 
     // ---- Load prior static findings ----
+    await checkpoints.checkpoint('static_findings.load.started');
     const priorAnalyses = await TraceAnalysis.findAll({
       where: { traceId, status: 'completed' },
       attributes: ['id', 'rubricVersion'],
@@ -469,9 +600,13 @@ export class JudgeService {
       });
       staticFindings = findings.map((f) => f.toJSON());
     }
+    await checkpoints.checkpoint('static_findings.load.completed', {
+      priorAnalysisCount: priorAnalyses.length,
+      staticFindingCount: staticFindings.length,
+    });
 
     // ---- Create analysis record ----
-    const analysis = await TraceAnalysis.create({
+    analysis = await TraceAnalysis.create({
       traceId,
       status: 'running',
       rubricVersion: 'judge-v1',
@@ -480,12 +615,13 @@ export class JudgeService {
       startedAt: now,
       summary: { analyzer: 'judge-v1', mode: judgeMode, dimensions },
     });
+    await checkpoints.checkpoint('analysis.record.created', { analysisId: analysis.id });
 
     try {
       // ---- Run each dimension ----
-      const dimensionResults: DimensionScore[] = [];
-      const allFindings: any[] = [];
-      const severityCounts: Record<string, number> = {};
+      await checkpoints.checkpoint('dimensions.started', {
+        dimensionCount: dimensions.length,
+      });
 
       // Determine which dimensions to skip
       const hasSystemPrompt = systemPrompt.length > 0;
@@ -493,7 +629,9 @@ export class JudgeService {
       const hasEvents = events.length > 0;
 
       for (const dim of dimensions) {
+        const dimensionCheckpoints = checkpoints.scoped(`dimension.${dim}`);
         try {
+          await dimensionCheckpoints.checkpoint('started');
           const result = await this.runDimension(dim, {
             events,
             systemPrompt,
@@ -505,6 +643,7 @@ export class JudgeService {
             judgeModel,
             mode: judgeMode,
             executionProfile,
+            checkpoints: dimensionCheckpoints,
           });
 
           if (result.skipped) {
@@ -515,6 +654,9 @@ export class JudgeService {
               patchCount: 0,
               skipped: true,
               skipReason: result.skipReason,
+            });
+            await dimensionCheckpoints.checkpoint('skipped', {
+              reason: result.skipReason,
             });
             continue;
           }
@@ -552,6 +694,11 @@ export class JudgeService {
             patchCount: result.patchCount,
             skipped: false,
           });
+          await dimensionCheckpoints.checkpoint('completed', {
+            score: result.score,
+            issueCount: result.issueCount,
+            patchCount: result.patchCount,
+          });
         } catch (dimError: any) {
           const diagnostics = extractJudgeErrorDiagnostics(dimError);
           logger.error(
@@ -580,34 +727,20 @@ export class JudgeService {
             skipped: true,
             skipReason: `Evaluation failed: ${dimError?.message || 'unknown error'}`,
           });
+          await dimensionCheckpoints.checkpoint('failed', {
+            errorMessage: dimError?.message || 'unknown error',
+            status: diagnostics.status,
+            requestId: diagnostics.requestId,
+          });
         }
       }
 
       // ---- Compute summary ----
-      const scoredDimensions = dimensionResults.filter((d) => !d.skipped);
-      const overallScore =
-        scoredDimensions.length > 0
-          ? Math.round(
-              (scoredDimensions.reduce((s, d) => s + d.score, 0) / scoredDimensions.length) * 100
-            ) / 100
-          : 0;
-
-      const dimensionScores: Record<string, number> = {};
-      for (const d of dimensionResults) {
-        dimensionScores[d.dimension] = d.skipped ? -1 : Math.round(d.score * 100) / 100;
-      }
-
-      const totalIssues = dimensionResults.reduce((s, d) => s + d.issueCount, 0);
-      const totalPatches = dimensionResults.reduce((s, d) => s + d.patchCount, 0);
-
-      const summary = {
-        overallScore,
-        dimensionScores,
-        totalIssues,
-        totalPatches,
-        bySeverity: severityCounts,
-        dimensionDetails: dimensionResults,
-      };
+      const summary = buildSummary();
+      await checkpoints.checkpoint('dimensions.completed', {
+        totalIssues: summary.totalIssues,
+        totalPatches: summary.totalPatches,
+      });
 
       // ---- Update analysis record ----
       await analysis.update({
@@ -615,8 +748,13 @@ export class JudgeService {
         finishedAt: new Date(),
         summary,
       });
+      snapshotStatus = 'completed';
+      await checkpoints.checkpoint('analysis.completed', {
+        analysisId: analysis.id,
+        overallScore: summary.overallScore,
+      });
 
-      return {
+      const completedResult: JudgeResult = {
         id: analysis.id,
         traceId,
         status: 'completed',
@@ -626,6 +764,7 @@ export class JudgeService {
         summary,
         findings: allFindings,
       };
+      return completedResult;
     } catch (error: any) {
       const diagnostics = extractJudgeErrorDiagnostics(error);
       logger.error(
@@ -652,6 +791,13 @@ export class JudgeService {
           error: error?.message || 'UNKNOWN_ERROR',
         },
       });
+      snapshotStatus = 'failed';
+      await checkpoints.checkpoint('analysis.failed', {
+        analysisId: analysis.id,
+        errorMessage: error?.message || 'UNKNOWN_ERROR',
+        status: diagnostics.status,
+        requestId: diagnostics.requestId,
+      });
       throw error;
     }
   }
@@ -672,6 +818,7 @@ export class JudgeService {
       judgeModel: string;
       mode: JudgeMode;
       executionProfile: JudgeExecutionProfile;
+      checkpoints: JudgeCheckpointEmitter<JudgeResult>;
     }
   ): Promise<{
     score: number;
@@ -715,7 +862,9 @@ export class JudgeService {
     judgeModel: string;
     mode: JudgeMode;
     executionProfile: JudgeExecutionProfile;
+    checkpoints: JudgeCheckpointEmitter<JudgeResult>;
   }) {
+    await ctx.checkpoints.checkpoint('step_correctness.started');
     if (!ctx.hasEvents) {
       return { score: 0, issueCount: 0, patchCount: 0, skipped: true, skipReason: 'No events in trace', findings: [] };
     }
@@ -733,6 +882,10 @@ export class JudgeService {
         },
         'Step correctness applying mode-based event sampling'
       );
+      await ctx.checkpoints.checkpoint('step_correctness.sampled', {
+        originalEvents: ctx.events.length,
+        evaluatedEvents: eventsForEvaluation.length,
+      });
     }
 
     const responseEvents = eventsForEvaluation.filter((e) => e.eventType === 'llm_response');
@@ -747,29 +900,67 @@ export class JudgeService {
     if (useMapReduce) {
       const chunks = chunkEvents(eventsForEvaluation, THRESHOLDS.TRACE_MAP_REDUCE_LIMIT);
       logger.info({ chunks: chunks.length, totalEvents: eventsForEvaluation.length }, 'Using map-reduce for step correctness');
+      await ctx.checkpoints.checkpoint('step_correctness.map_reduce.started', {
+        chunkCount: chunks.length,
+        totalEvents: eventsForEvaluation.length,
+      });
 
       const chunkResults = await Promise.all(
-        chunks.map((chunk) =>
+        chunks.map(async (chunk, index) => {
+          await ctx.checkpoints.checkpoint('step_correctness.map_reduce.chunk.started', {
+            chunkIndex: index + 1,
+            chunkCount: chunks.length,
+            chunkEvents: chunk.length,
+          });
+          const result = await runWithCheckpointHeartbeat({
+            checkpoints: ctx.checkpoints,
+            key: 'step_correctness.map_reduce.chunk.call',
+            startedData: {
+              chunkIndex: index + 1,
+              chunkCount: chunks.length,
+            },
+            run: () =>
+              runStepCorrectnessChain(
+                {
+                  systemPrompt: ctx.systemPrompt,
+                  traceSteps: formatTraceSteps(chunk),
+                  staticFindings: formatStaticFindings(ctx.staticFindings, 'step_correctness'),
+                },
+                ctx.judgeModel
+              ),
+          });
+          await ctx.checkpoints.checkpoint('step_correctness.map_reduce.chunk.completed', {
+            chunkIndex: index + 1,
+            chunkCount: chunks.length,
+            stepResults: result.length,
+          });
+          return result;
+        })
+      );
+      allResults = chunkResults.flat();
+      await ctx.checkpoints.checkpoint('step_correctness.map_reduce.completed', {
+        totalStepResults: allResults.length,
+      });
+    } else {
+      allResults = await runWithCheckpointHeartbeat({
+        checkpoints: ctx.checkpoints,
+        key: 'step_correctness.single_pass.call',
+        startedData: {
+          evaluatedEvents: eventsForEvaluation.length,
+        },
+        run: () =>
           runStepCorrectnessChain(
             {
               systemPrompt: ctx.systemPrompt,
-              traceSteps: formatTraceSteps(chunk),
+              traceSteps: formatTraceSteps(eventsForEvaluation),
               staticFindings: formatStaticFindings(ctx.staticFindings, 'step_correctness'),
             },
             ctx.judgeModel
-          )
-        )
-      );
-      allResults = chunkResults.flat();
-    } else {
-      allResults = await runStepCorrectnessChain(
-        {
-          systemPrompt: ctx.systemPrompt,
-          traceSteps: formatTraceSteps(eventsForEvaluation),
-          staticFindings: formatStaticFindings(ctx.staticFindings, 'step_correctness'),
-        },
-        ctx.judgeModel
-      );
+          ),
+      });
+      await ctx.checkpoints.checkpoint('step_correctness.single_pass.completed', {
+        stepResults: allResults.length,
+      });
     }
 
     const avgScore =
@@ -814,7 +1005,9 @@ export class JudgeService {
     judgeModel: string;
     mode: JudgeMode;
     executionProfile: JudgeExecutionProfile;
+    checkpoints: JudgeCheckpointEmitter<JudgeResult>;
   }) {
+    await ctx.checkpoints.checkpoint('tool_choice.started');
     if (!ctx.hasEvents || !ctx.hasTools) {
       return {
         score: 0,
@@ -839,6 +1032,10 @@ export class JudgeService {
           },
           'Tool choice applying mode-based step sampling'
         );
+        await ctx.checkpoints.checkpoint('tool_choice.sampled', {
+          originalToolCallSteps: fullToolCallCount,
+          evaluatedToolCallSteps: toolCallEvents.length,
+        });
       }
     }
 
@@ -862,17 +1059,31 @@ export class JudgeService {
       nearbyToolNames: nearbyTools,
     });
 
-    const results = await runToolChoiceChain(
-      {
-        userMessage,
-        candidateTools: JSON.stringify(filterResult.candidateTools, null, 2),
-        candidateCount: filterResult.candidateTools.length,
-        totalTools: filterResult.totalToolsAvailable,
-        toolCallSteps: formatToolCallSteps(toolCallEvents),
-        systemPrompt: ctx.systemPrompt,
+    const results = await runWithCheckpointHeartbeat({
+      checkpoints: ctx.checkpoints,
+      key: 'tool_choice.call',
+      startedData: {
+        evaluatedToolCallSteps: toolCallEvents.length,
+        candidateTools: filterResult.candidateTools.length,
       },
-      ctx.judgeModel
-    );
+      run: () =>
+        runToolChoiceChain(
+          {
+            userMessage,
+            candidateTools: JSON.stringify(filterResult.candidateTools, null, 2),
+            candidateCount: filterResult.candidateTools.length,
+            totalTools: filterResult.totalToolsAvailable,
+            toolCallSteps: formatToolCallSteps(toolCallEvents),
+            systemPrompt: ctx.systemPrompt,
+          },
+          ctx.judgeModel
+        ),
+    });
+    await ctx.checkpoints.checkpoint('tool_choice.chain.completed', {
+      evaluatedSteps: results.length,
+      candidateTools: filterResult.candidateTools.length,
+      totalTools: filterResult.totalToolsAvailable,
+    });
 
     const avgScore =
       results.length > 0 ? results.reduce((s, r) => s + r.score, 0) / results.length : 0;
@@ -918,7 +1129,9 @@ export class JudgeService {
     judgeModel: string;
     mode: JudgeMode;
     executionProfile: JudgeExecutionProfile;
+    checkpoints: JudgeCheckpointEmitter<JudgeResult>;
   }) {
+    await ctx.checkpoints.checkpoint('prompt_quality.started');
     if (!ctx.hasSystemPrompt) {
       return {
         score: 0,
@@ -930,19 +1143,37 @@ export class JudgeService {
       };
     }
 
-    const result: PromptQualityResult = await runPromptQualityChain(
-      {
-        systemPrompt: ctx.systemPrompt,
-        observedBehavior: extractObservedBehavior(ctx.events),
-        staticFindings: formatStaticFindings(ctx.staticFindings),
-      },
-      ctx.judgeModel,
-      {
+    const result: PromptQualityResult = await runWithCheckpointHeartbeat({
+      checkpoints: ctx.checkpoints,
+      key: 'prompt_quality.call',
+      startedData: {
         skipSynthesis: ctx.executionProfile.promptQualitySkipSynthesis,
         maxBlocks: ctx.executionProfile.promptQualityMaxBlocks,
         blockEvalConcurrency: ctx.executionProfile.promptQualityBlockEvalConcurrency,
-      }
-    );
+      },
+      run: () =>
+        runPromptQualityChain(
+          {
+            systemPrompt: ctx.systemPrompt,
+            observedBehavior: extractObservedBehavior(ctx.events),
+            staticFindings: formatStaticFindings(ctx.staticFindings),
+          },
+          ctx.judgeModel,
+          {
+            skipSynthesis: ctx.executionProfile.promptQualitySkipSynthesis,
+            maxBlocks: ctx.executionProfile.promptQualityMaxBlocks,
+            blockEvalConcurrency: ctx.executionProfile.promptQualityBlockEvalConcurrency,
+            onCheckpoint: async (key, data) => {
+              await ctx.checkpoints.checkpoint(`prompt_quality.${key}`, data);
+            },
+          }
+        ),
+    });
+    await ctx.checkpoints.checkpoint('prompt_quality.chain.completed', {
+      score: result.overallScore,
+      issues: result.issues.length,
+      patches: result.patches.length,
+    });
 
     const findings = [
       {
@@ -980,7 +1211,9 @@ export class JudgeService {
     judgeModel: string;
     mode: JudgeMode;
     executionProfile: JudgeExecutionProfile;
+    checkpoints: JudgeCheckpointEmitter<JudgeResult>;
   }) {
+    await ctx.checkpoints.checkpoint('tool_description.started');
     if (!ctx.hasTools) {
       return {
         score: 0,
@@ -1006,16 +1239,34 @@ export class JudgeService {
         },
         'Tool description applying mode-based tool sampling'
       );
+      await ctx.checkpoints.checkpoint('tool_description.sampled', {
+        originalTools: ctx.tools.length,
+        evaluatedTools: toolsForEvaluation.length,
+      });
     }
 
-    const result: ToolDescriptionResult = await runToolDescriptionChain(
-      {
-        toolDefinitions: JSON.stringify(toolsForEvaluation, null, 2),
-        observedToolUsage: extractToolUsageFromEvents(ctx.events),
-        toolMisuseFindings: formatStaticFindings(ctx.staticFindings, 'tool_description'),
+    const result: ToolDescriptionResult = await runWithCheckpointHeartbeat({
+      checkpoints: ctx.checkpoints,
+      key: 'tool_description.call',
+      startedData: {
+        evaluatedTools: toolsForEvaluation.length,
       },
-      ctx.judgeModel
-    );
+      run: () =>
+        runToolDescriptionChain(
+          {
+            toolDefinitions: JSON.stringify(toolsForEvaluation, null, 2),
+            observedToolUsage: extractToolUsageFromEvents(ctx.events),
+            toolMisuseFindings: formatStaticFindings(ctx.staticFindings, 'tool_description'),
+          },
+          ctx.judgeModel
+        ),
+    });
+    await ctx.checkpoints.checkpoint('tool_description.chain.completed', {
+      score: result.overallScore,
+      toolsEvaluated: result.toolEvaluations.length,
+      issues: result.issues.length,
+      patches: result.patches.length,
+    });
 
     const findings = [
       {
@@ -1051,7 +1302,9 @@ export class JudgeService {
     judgeModel: string;
     mode: JudgeMode;
     executionProfile: JudgeExecutionProfile;
+    checkpoints: JudgeCheckpointEmitter<JudgeResult>;
   }) {
+    await ctx.checkpoints.checkpoint('cost_efficiency.started');
     if (!ctx.hasEvents) {
       return {
         score: 0,
@@ -1087,15 +1340,33 @@ export class JudgeService {
         },
         'Cost efficiency applying mode-based step sampling'
       );
+      await ctx.checkpoints.checkpoint('cost_efficiency.sampled', {
+        originalResponseSteps: allResponseEvents.length,
+        evaluatedResponseSteps: responseEvents.length,
+      });
     }
 
-    const result: CostEfficiencyResult = await runCostEfficiencyChain(
-      {
-        traceStepsWithMetrics: formatStepsWithMetrics(responseEvents),
-        staticCostFindings: formatStaticFindings(ctx.staticFindings, 'cost_efficiency'),
+    const result: CostEfficiencyResult = await runWithCheckpointHeartbeat({
+      checkpoints: ctx.checkpoints,
+      key: 'cost_efficiency.call',
+      startedData: {
+        evaluatedResponseSteps: responseEvents.length,
       },
-      ctx.judgeModel
-    );
+      run: () =>
+        runCostEfficiencyChain(
+          {
+            traceStepsWithMetrics: formatStepsWithMetrics(responseEvents),
+            staticCostFindings: formatStaticFindings(ctx.staticFindings, 'cost_efficiency'),
+          },
+          ctx.judgeModel
+        ),
+    });
+    await ctx.checkpoints.checkpoint('cost_efficiency.chain.completed', {
+      score: result.overallScore,
+      issues: result.issues.length,
+      evaluatedSteps: result.stepEvaluations.length,
+      potentialSavingsPercent: result.summary.potentialSavingsPercent,
+    });
 
     const findings = [
       {

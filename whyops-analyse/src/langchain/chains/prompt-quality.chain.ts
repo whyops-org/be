@@ -35,6 +35,8 @@ export interface PromptQualityExecutionOptions {
   maxBlocks?: number;
   /** Override default block-evaluation concurrency. */
   blockEvalConcurrency?: number;
+  /** Optional fine-grained checkpoint callback. */
+  onCheckpoint?: (key: string, data?: Record<string, unknown>) => void | Promise<void>;
 }
 
 async function mapWithConcurrency<T, R>(
@@ -87,6 +89,15 @@ function sampleEvenly<T>(items: T[], limit: number): T[] {
   }
 
   return sampled;
+}
+
+async function emitCheckpoint(
+  options: PromptQualityExecutionOptions | undefined,
+  key: string,
+  data?: Record<string, unknown>
+) {
+  if (!options?.onCheckpoint) return;
+  await options.onCheckpoint(key, data);
 }
 
 // ---------------------------------------------------------------------------
@@ -192,13 +203,24 @@ export async function runPromptQualityChain(
   options?: PromptQualityExecutionOptions
 ): Promise<PromptQualityResult> {
   logger.info('Running prompt quality chain');
+  await emitCheckpoint(options, 'started');
 
   const segmentation = await segmentPrompt(input.systemPrompt);
+  await emitCheckpoint(options, 'segmentation.completed', {
+    wasSegmented: segmentation.wasSegmented,
+    method: segmentation.method,
+    blockCount: segmentation.blocks.length,
+  });
 
   // ---- Small prompt: single pass ----
   if (!segmentation.wasSegmented) {
     logger.info({ method: 'single_pass' }, 'Prompt small enough for single-pass evaluation');
     const result = await runSinglePass(input, overrideModel);
+    await emitCheckpoint(options, 'single_pass.completed', {
+      score: result.overallScore,
+      issues: result.issues.length,
+      patches: result.patches.length,
+    });
     logger.info({ score: result.overallScore, issues: result.issues.length }, 'Prompt quality single-pass complete');
     return result;
   }
@@ -225,21 +247,55 @@ export async function runPromptQualityChain(
   );
 
   const blockNames = blocks.map((b) => b.name);
+  await emitCheckpoint(options, 'block_eval.started', {
+    totalBlocks: segmentation.blocks.length,
+    evaluatedBlocks: blocks.length,
+    concurrency: blockEvalConcurrency,
+  });
 
   // Run per-block evaluations with bounded concurrency
+  let completedBlocks = 0;
   const blockResults = await mapWithConcurrency(
     blocks,
     blockEvalConcurrency,
-    async (block) => {
+    async (block, index) => {
       const otherNames = blockNames.filter((n) => n !== block.name);
-      return runBlockEval(block, otherNames, overrideModel);
+      await emitCheckpoint(options, 'block_eval.block.started', {
+        block: block.name,
+        blockIndex: index + 1,
+        totalBlocks: blocks.length,
+      });
+      const blockResult = await runBlockEval(block, otherNames, overrideModel);
+      completedBlocks += 1;
+      await emitCheckpoint(options, 'block_eval.block.completed', {
+        block: block.name,
+        blockIndex: index + 1,
+        totalBlocks: blocks.length,
+        completedBlocks,
+        score: blockResult.score,
+        issueCount: blockResult.issues.length,
+        patchCount: blockResult.patches.length,
+      });
+      return blockResult;
     }
   );
+  await emitCheckpoint(options, 'block_eval.completed', {
+    evaluatedBlocks: blockResults.length,
+  });
 
   // Run cross-section synthesis unless quick mode asks to skip it.
   const synthesisResult = skipSynthesis
     ? null
     : await runSynthesis(blockResults, blockNames, overrideModel);
+  if (skipSynthesis) {
+    await emitCheckpoint(options, 'synthesis.skipped');
+  } else {
+    await emitCheckpoint(options, 'synthesis.completed', {
+      crossSectionIssues: synthesisResult?.crossSectionIssues.length || 0,
+      orderingIssues: synthesisResult?.orderingIssues.length || 0,
+      missingBlocks: synthesisResult?.missingBlocks.length || 0,
+    });
+  }
 
   // Merge everything into a single PromptQualityResult
   const allIssues: Issue[] = [
@@ -307,6 +363,12 @@ export async function runPromptQualityChain(
     },
     'Prompt quality segmented evaluation complete'
   );
+  await emitCheckpoint(options, 'completed', {
+    score: merged.overallScore,
+    issues: merged.issues.length,
+    patches: merged.patches.length,
+    blockCount: blockResults.length,
+  });
 
   return merged;
 }

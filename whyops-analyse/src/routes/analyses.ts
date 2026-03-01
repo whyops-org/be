@@ -84,6 +84,115 @@ app.post(
 
     try {
       const data = c.req.valid('json');
+      const accept = c.req.header('accept') || '';
+      const wantsStream =
+        c.req.query('stream') === 'true' || accept.includes('application/x-ndjson');
+
+      if (wantsStream) {
+        const encoder = new TextEncoder();
+
+        const stream = new ReadableStream({
+          start(controller) {
+            let closed = false;
+            let sentFailedSnapshot = false;
+
+            const writeChunk = async (chunk: unknown) => {
+              if (closed) return;
+              try {
+                controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
+              } catch (error: any) {
+                closed = true;
+                logger.warn(
+                  {
+                    errorMessage: error?.message || String(error),
+                    errorCode: error?.code,
+                  },
+                  "Judge stream write skipped because stream is closed"
+                );
+              }
+            };
+
+            const close = () => {
+              if (closed) return;
+              closed = true;
+              try {
+                controller.close();
+              } catch (error: any) {
+                logger.warn(
+                  {
+                    errorMessage: error?.message || String(error),
+                    errorCode: error?.code,
+                  },
+                  "Judge stream close ignored because stream is already closed"
+                );
+              }
+            };
+
+            void (async () => {
+              try {
+                const result = await JudgeService.runLLMJudge({
+                  traceId: data.traceId,
+                  userId: auth.userId,
+                  dimensions: data.dimensions as JudgeDimension[] | undefined,
+                  judgeModel: data.judgeModel,
+                  mode: data.mode,
+                  onCheckpoint: async (event) => {
+                    if (!event.snapshot) return;
+                    if (event.snapshot.status === 'failed') sentFailedSnapshot = true;
+                    await writeChunk({
+                      success: true,
+                      analysis: {
+                        ...event.snapshot,
+                        summary: {
+                          ...event.snapshot.summary,
+                          checkpoint: {
+                            key: event.key,
+                            sequence: event.sequence,
+                            at: event.at,
+                            data: event.data,
+                          },
+                        },
+                      },
+                    });
+                  },
+                });
+
+                await writeChunk({
+                  success: true,
+                  analysis: result,
+                });
+              } catch (error: any) {
+                if (sentFailedSnapshot) {
+                  // A failed analysis snapshot was already streamed.
+                } else if (error?.message === 'TRACE_NOT_FOUND') {
+                  await writeChunk({ success: false, error: 'Trace not found' });
+                } else if (error?.message === 'JUDGE_NOT_CONFIGURED') {
+                  await writeChunk({
+                    success: false,
+                    error: 'LLM Judge not configured. Set JUDGE_LLM_API_KEY environment variable.',
+                  });
+                } else {
+                  logger.error({ error }, 'Failed to run LLM judge (stream)');
+                  await writeChunk({ success: false, error: 'Failed to run LLM judge' });
+                }
+              } finally {
+                close();
+              }
+            })();
+          },
+        });
+
+        return new Response(stream, {
+          status: 200,
+          headers: {
+            'content-type': 'application/x-ndjson; charset=utf-8',
+            'cache-control': 'no-cache, no-transform',
+            connection: 'keep-alive',
+            'x-accel-buffering': 'no',
+          },
+        });
+      }
+
       const result = await JudgeService.runLLMJudge({
         traceId: data.traceId,
         userId: auth.userId,
@@ -159,4 +268,3 @@ app.get('/:analysisId', async (c) => {
 });
 
 export default app;
-
