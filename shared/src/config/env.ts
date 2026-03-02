@@ -13,6 +13,17 @@ if (fs.existsSync(envPath)) {
   dotenv.config({ path: parentEnvPath });
 }
 
+const envBoolean = z.preprocess((value) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'n', 'off', ''].includes(normalized)) return false;
+  }
+  if (typeof value === 'number') return value !== 0;
+  return value;
+}, z.boolean());
+
 // Environment validation schema
 const envSchema = z.object({
   // Database
@@ -22,8 +33,8 @@ const envSchema = z.object({
   DB_NAME: z.string().default('whyops'),
   DB_USER: z.string().default('postgres'),
   DB_PASSWORD: z.string().default('postgres'),
-  DB_SSL: z.coerce.boolean().optional(),
-  DB_SSL_REJECT_UNAUTHORIZED: z.coerce.boolean().default(false),
+  DB_SSL: envBoolean.optional(),
+  DB_SSL_REJECT_UNAUTHORIZED: envBoolean.default(false),
   DB_POOL_MAX: z.coerce.number().default(20),
   DB_POOL_MIN: z.coerce.number().default(5),
   
@@ -64,7 +75,7 @@ const envSchema = z.object({
   EVENTS_STREAM_BATCH_SIZE: z.coerce.number().default(100),
   EVENTS_STREAM_BLOCK_MS: z.coerce.number().default(2000),
   EVENTS_STREAM_RETRY_MAX: z.coerce.number().default(5),
-  EVENTS_WORKER_ENABLED: z.coerce.boolean().default(true),
+  EVENTS_WORKER_ENABLED: envBoolean.default(true),
 
   // Cache configuration
   AUTH_APIKEY_CACHE_TTL_SEC: z.coerce.number().default(60),

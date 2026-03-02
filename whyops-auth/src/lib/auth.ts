@@ -1,5 +1,5 @@
 import env, { getTrustedOrigins } from '@whyops/shared/env';
-import { buildPgSslConfig, logger } from '@whyops/shared/utils';
+import { buildPgSslConfig, logger, parseDatabaseUrl } from '@whyops/shared/utils';
 import { betterAuth } from 'better-auth';
 import { createAuthMiddleware } from 'better-auth/api';
 import { magicLink } from 'better-auth/plugins';
@@ -7,23 +7,54 @@ import { Kysely, PostgresDialect } from 'kysely';
 import { Pool } from 'pg';
 import { sendMagicLinkEmail } from '../utils/email.util';
 
+const parsedDbUrl = env.DATABASE_URL ? parseDatabaseUrl(env.DATABASE_URL) : null;
+
+const poolConfig = env.DATABASE_URL
+  ? {
+      connectionString: env.DATABASE_URL,
+      host: parsedDbUrl?.host,
+      port: parsedDbUrl?.port,
+      database: parsedDbUrl?.database,
+      user: parsedDbUrl?.username,
+    }
+  : {
+      host: env.DB_HOST,
+      port: env.DB_PORT,
+      database: env.DB_NAME,
+      user: env.DB_USER,
+    };
+
+const ssl = buildPgSslConfig({
+  databaseUrl: env.DATABASE_URL,
+  dbHost: parsedDbUrl?.host || env.DB_HOST,
+  explicitSsl: env.DB_SSL,
+  rejectUnauthorized: env.DB_SSL_REJECT_UNAUTHORIZED,
+});
+
 // Create Kysely instance for Better Auth
 const db = new Kysely({
   dialect: new PostgresDialect({
     pool: new Pool({
-      connectionString: env.DATABASE_URL,
+      ...poolConfig,
+      password: env.DB_PASSWORD,
       max: env.DB_POOL_MAX,
       min: env.DB_POOL_MIN,
-      ssl: buildPgSslConfig({
-        databaseUrl: env.DATABASE_URL,
-        explicitSsl: env.DB_SSL,
-        rejectUnauthorized: env.DB_SSL_REJECT_UNAUTHORIZED,
-      }),
+      ssl,
     }),
   }),
 });
 
-logger.info(`Initialized Kysely database connection for Better Auth, Base URL: ${env.BETTER_AUTH_URL}, Secret: ${env.BETTER_AUTH_SECRET}`);
+logger.info(
+  {
+    baseURL: env.BETTER_AUTH_URL,
+    dbHost: parsedDbUrl?.host || env.DB_HOST,
+    dbPort: parsedDbUrl?.port || env.DB_PORT,
+    dbName: parsedDbUrl?.database || env.DB_NAME,
+    dbSslEnabled: ssl !== false,
+    dbSslRejectUnauthorized: ssl !== false ? ssl.rejectUnauthorized : false,
+  },
+  'Initialized Kysely database connection for Better Auth'
+);
 
 // Configure Better Auth
 export const auth = betterAuth({
