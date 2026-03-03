@@ -2,9 +2,13 @@ import { createServiceLogger } from '@whyops/shared/logger';
 import type { Context, Next } from 'hono';
 import type { AuthMiddlewareConfig, UnifiedAuthContext, SessionUser, UserSession } from './types';
 import { extractApiKey } from './api-key-extractor';
+import type { BetterAuthSession } from './auth-utils';
 import { getSessionAuthContext, loadUserSession, loadUserSessionFromBetterAuth, validateApiKey } from './auth-utils';
 
 const logger = createServiceLogger('middleware:auth');
+const LOCAL_SESSION_CACHE_TTL_MS = 10_000;
+const localSessionCache = new Map<string, { expiresAtMs: number; session: unknown | null }>();
+const localSessionInFlight = new Map<string, Promise<unknown | null>>();
 
 const defaultConfig: AuthMiddlewareConfig = {
   requireAuth: false,
@@ -119,18 +123,74 @@ export const optionalAuthMiddleware = createAuthMiddleware({ requireAuth: false 
 
 export interface BetterAuthInstance {
   api: {
-    getSession: (options: { headers: Headers }) => Promise<any>;
+    getSession: (options: { headers: Headers }) => Promise<unknown>;
   };
+}
+
+function extractSessionTokenFromCookieHeader(cookieHeader: string | null | undefined): string | null {
+  if (!cookieHeader) return null;
+  const match = cookieHeader.match(
+    /(?:^|;\s*)(?:__Secure-better-auth\.session_token|better-auth\.session_token)=([^;]+)/
+  );
+  return match?.[1] || null;
+}
+
+function isBetterAuthSession(value: unknown): value is BetterAuthSession {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.user === 'object' && candidate.user !== null &&
+    typeof candidate.session === 'object' && candidate.session !== null;
 }
 
 export function createLocalSessionMiddleware(auth: BetterAuthInstance) {
   return async function localSessionMiddleware(c: Context, next: Next) {
     try {
-      const session = await auth.api.getSession({
-        headers: c.req.raw.headers,
-      });
+      const cookieHeader = c.req.header('Cookie');
+      const token = extractSessionTokenFromCookieHeader(cookieHeader);
+      const cacheKey = token ? `session:${token}` : null;
+      const now = Date.now();
+
+      let session: unknown | null = null;
+      if (cacheKey) {
+        const cached = localSessionCache.get(cacheKey);
+        if (cached && now <= cached.expiresAtMs) {
+          session = cached.session;
+        } else {
+          const existingInFlight = localSessionInFlight.get(cacheKey);
+          if (existingInFlight) {
+            session = await existingInFlight;
+          } else {
+            const fetchPromise = auth.api.getSession({
+              headers: c.req.raw.headers,
+            });
+            localSessionInFlight.set(cacheKey, fetchPromise);
+
+            try {
+              session = await fetchPromise;
+            } finally {
+              localSessionInFlight.delete(cacheKey);
+            }
+
+            localSessionCache.set(cacheKey, {
+              expiresAtMs: Date.now() + LOCAL_SESSION_CACHE_TTL_MS,
+              session: session ?? null,
+            });
+          }
+        }
+      } else {
+        session = await auth.api.getSession({
+          headers: c.req.raw.headers,
+        });
+      }
 
       if (!session) {
+        c.set('sessionUser', null);
+        c.set('sessionData', null);
+        await next();
+        return;
+      }
+
+      if (!isBetterAuthSession(session)) {
         c.set('sessionUser', null);
         c.set('sessionData', null);
         await next();

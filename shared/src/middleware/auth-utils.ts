@@ -15,6 +15,7 @@ import type { ApiKeyAuthContext, SessionAuthContext, SessionUser, UserSession } 
 const logger = createServiceLogger('auth:utils');
 const REMOTE_SESSION_CACHE_TTL_MS = 15_000;
 const SESSION_USER_CACHE_TTL_MS = 30_000;
+const SESSION_AUTH_CONTEXT_CACHE_TTL_MS = 30_000;
 
 const remoteSessionCache = new Map<
   string,
@@ -22,6 +23,22 @@ const remoteSessionCache = new Map<
 >();
 const remoteSessionInFlight = new Map<string, Promise<BetterAuthSession | null>>();
 const sessionUserCache = new Map<string, { expiresAtMs: number; user: SessionUser }>();
+const sessionAuthContextCache = new Map<string, { expiresAtMs: number; context: SessionAuthContext | null }>();
+const sessionAuthContextInFlight = new Map<string, Promise<SessionAuthContext | null>>();
+
+function cloneSessionAuthContext(context: SessionAuthContext): SessionAuthContext {
+  return {
+    authType: context.authType,
+    userId: context.userId,
+    projectId: context.projectId,
+    environmentId: context.environmentId,
+    providerId: context.providerId,
+    isMaster: context.isMaster,
+    sessionId: context.sessionId,
+    userEmail: context.userEmail,
+    userName: context.userName,
+  };
+}
 
 function extractSessionTokenFromCookieHeader(cookieHeader: string | null | undefined): string | null {
   if (!cookieHeader) return null;
@@ -75,6 +92,23 @@ function setCachedSessionUser(user: SessionUser): void {
   sessionUserCache.set(user.id, {
     expiresAtMs: Date.now() + SESSION_USER_CACHE_TTL_MS,
     user,
+  });
+}
+
+function getCachedSessionAuthContext(userId: string): SessionAuthContext | null | undefined {
+  const cached = sessionAuthContextCache.get(userId);
+  if (!cached) return undefined;
+  if (Date.now() > cached.expiresAtMs) {
+    sessionAuthContextCache.delete(userId);
+    return undefined;
+  }
+  return cached.context ? cloneSessionAuthContext(cached.context) : null;
+}
+
+function setCachedSessionAuthContext(userId: string, context: SessionAuthContext | null): void {
+  sessionAuthContextCache.set(userId, {
+    expiresAtMs: Date.now() + SESSION_AUTH_CONTEXT_CACHE_TTL_MS,
+    context: context ? cloneSessionAuthContext(context) : null,
   });
 }
 
@@ -351,88 +385,111 @@ export async function validateApiKey(
 export async function getSessionAuthContext(
   userId: string
 ): Promise<SessionAuthContext | null> {
-  try {
-    // Primary strategy: rank active master keys by usage recency, then creation time.
-    // This aligns session-scoped dashboards with where traffic is actually flowing.
-    const rankedMasterKeys = await ApiKey.findAll({
-      where: {
+  const cached = getCachedSessionAuthContext(userId);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const existingInFlight = sessionAuthContextInFlight.get(userId);
+  if (existingInFlight) {
+    const context = await existingInFlight;
+    return context ? cloneSessionAuthContext(context) : null;
+  }
+
+  const fetchPromise = (async () => {
+    try {
+      // Primary strategy: rank active master keys by usage recency, then creation time.
+      // This aligns session-scoped dashboards with where traffic is actually flowing.
+      const rankedMasterKeys = await ApiKey.findAll({
+        where: {
+          userId,
+          isMaster: true,
+          isActive: true,
+        },
+        include: [
+          { model: Provider, as: 'provider', required: false },
+          { model: Project, as: 'project', required: true, where: { isActive: true } },
+          { model: Environment, as: 'environment', required: true, where: { isActive: true } },
+        ],
+        order: [['createdAt', 'DESC']],
+        limit: 50,
+      });
+
+      const apiKeyRecord = rankedMasterKeys
+        .slice()
+        .sort((a, b) => {
+          const aUsedAt = a.lastUsedAt?.getTime() ?? null;
+          const bUsedAt = b.lastUsedAt?.getTime() ?? null;
+          if (aUsedAt !== null && bUsedAt !== null) return bUsedAt - aUsedAt;
+          if (aUsedAt !== null) return -1;
+          if (bUsedAt !== null) return 1;
+          return b.createdAt.getTime() - a.createdAt.getTime();
+        })[0] ?? null;
+
+      // Last resort fallback for legacy data: first active project/environment.
+      let projectId: string | null = null;
+      let environmentId: string | null = null;
+      let providerId: string | undefined;
+
+      if (apiKeyRecord) {
+        const project = (apiKeyRecord as any).project as Project | undefined;
+        const environment = (apiKeyRecord as any).environment as Environment | undefined;
+        projectId = project?.id ?? null;
+        environmentId = environment?.id ?? null;
+        providerId = apiKeyRecord.providerId ?? undefined;
+      }
+
+      if (!projectId) {
+        const project = await Project.findOne({
+          where: { userId, isActive: true },
+          order: [['createdAt', 'ASC']],
+        });
+        projectId = project?.id ?? null;
+      }
+
+      if (!environmentId && projectId) {
+        const environment = await Environment.findOne({
+          where: { projectId, isActive: true },
+          order: [['createdAt', 'ASC']],
+        });
+        environmentId = environment?.id ?? null;
+      }
+
+      if (!projectId || !environmentId) {
+        return null;
+      }
+
+      if (!providerId) {
+        const inferredProvider = await resolveSingleActiveProvider(userId);
+        if (inferredProvider) {
+          providerId = inferredProvider.id;
+        }
+      }
+
+      return {
+        authType: 'session',
         userId,
+        projectId,
+        environmentId,
+        providerId,
         isMaster: true,
-        isActive: true,
-      },
-      include: [
-        { model: Provider, as: 'provider', required: false },
-        { model: Project, as: 'project', required: true, where: { isActive: true } },
-        { model: Environment, as: 'environment', required: true, where: { isActive: true } },
-      ],
-      order: [['createdAt', 'DESC']],
-      limit: 50,
-    });
-
-    const apiKeyRecord = rankedMasterKeys
-      .slice()
-      .sort((a, b) => {
-        const aUsedAt = a.lastUsedAt?.getTime() ?? null;
-        const bUsedAt = b.lastUsedAt?.getTime() ?? null;
-        if (aUsedAt !== null && bUsedAt !== null) return bUsedAt - aUsedAt;
-        if (aUsedAt !== null) return -1;
-        if (bUsedAt !== null) return 1;
-        return b.createdAt.getTime() - a.createdAt.getTime();
-      })[0] ?? null;
-
-    // Last resort fallback for legacy data: first active project/environment.
-    let projectId: string | null = null;
-    let environmentId: string | null = null;
-    let providerId: string | undefined;
-
-    if (apiKeyRecord) {
-      const project = (apiKeyRecord as any).project as Project | undefined;
-      const environment = (apiKeyRecord as any).environment as Environment | undefined;
-      projectId = project?.id ?? null;
-      environmentId = environment?.id ?? null;
-      providerId = apiKeyRecord.providerId ?? undefined;
-    }
-
-    if (!projectId) {
-      const project = await Project.findOne({
-        where: { userId, isActive: true },
-        order: [['createdAt', 'ASC']],
-      });
-      projectId = project?.id ?? null;
-    }
-
-    if (!environmentId && projectId) {
-      const environment = await Environment.findOne({
-        where: { projectId, isActive: true },
-        order: [['createdAt', 'ASC']],
-      });
-      environmentId = environment?.id ?? null;
-    }
-
-    if (!projectId || !environmentId) {
+        sessionId: '',
+        userEmail: '',
+      } satisfies SessionAuthContext;
+    } catch (error) {
+      logger.error({ error }, 'Failed to get session auth context');
       return null;
     }
+  })();
 
-    if (!providerId) {
-      const inferredProvider = await resolveSingleActiveProvider(userId);
-      if (inferredProvider) {
-        providerId = inferredProvider.id;
-      }
-    }
+  sessionAuthContextInFlight.set(userId, fetchPromise);
 
-    return {
-      authType: 'session',
-      userId,
-      projectId,
-      environmentId,
-      providerId,
-      isMaster: true,
-      sessionId: '',
-      userEmail: '',
-    };
-  } catch (error) {
-    logger.error({ error }, 'Failed to get session auth context');
-    return null;
+  try {
+    const context = await fetchPromise;
+    setCachedSessionAuthContext(userId, context);
+    return context ? cloneSessionAuthContext(context) : null;
+  } finally {
+    sessionAuthContextInFlight.delete(userId);
   }
 }
 

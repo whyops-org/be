@@ -23,6 +23,7 @@ const logger = createServiceLogger('auth');
 const app = new Hono();
 const GET_SESSION_CACHE_TTL_MS = 10_000;
 const getSessionCache = new Map<string, { expiresAtMs: number; payload: unknown }>();
+const getSessionInFlight = new Map<string, Promise<unknown | null>>();
 
 type MagicLinkRateState = Map<string, { count: number; start: number }>;
 const MAGIC_LINK_RATE_LIMIT: MagicLinkRateState = new Map();
@@ -92,9 +93,23 @@ app.get('/api/auth/get-session', async (c) => {
       return c.json(cached.payload, 200);
     }
 
-    const session = await auth.api.getSession({
+    const existingInFlight = getSessionInFlight.get(cacheKey);
+    if (existingInFlight) {
+      const session = await existingInFlight;
+      return c.json(session ?? null, 200);
+    }
+
+    const sessionPromise = auth.api.getSession({
       headers: c.req.raw.headers,
     });
+    getSessionInFlight.set(cacheKey, sessionPromise);
+
+    let session: unknown | null = null;
+    try {
+      session = await sessionPromise;
+    } finally {
+      getSessionInFlight.delete(cacheKey);
+    }
 
     getSessionCache.set(cacheKey, {
       expiresAtMs: Date.now() + GET_SESSION_CACHE_TTL_MS,

@@ -20,6 +20,21 @@ interface EntityMetricRow {
   lastActiveAt: string | Date | null;
 }
 
+interface EntityVersionRef {
+  id: string;
+  agentId?: string | null;
+}
+
+interface LatestEntityVersionRow {
+  id: string;
+  agentId: string;
+  hash: string;
+  metadata?: Record<string, any>;
+  samplingRate: string | number;
+  createdAt: string | Date;
+  updatedAt: string | Date;
+}
+
 interface AggregatedAgentMetrics {
   traceCount: number;
   successPercentage: number;
@@ -62,13 +77,30 @@ async function getEntityMetrics(entityIds: string[]): Promise<Map<string, Entity
       ),
       event_stats AS (
         SELECT
+          e.entity_id AS "entityId",
+          COUNT(e.id)::bigint AS "totalEvents",
+          COALESCE(SUM(CASE WHEN e.event_type = 'error' THEN 1 ELSE 0 END), 0)::bigint AS "errorEvents"
+        FROM trace_events e
+        WHERE e.entity_id IN (:entityIds)
+        GROUP BY e.entity_id
+        UNION ALL
+        SELECT
           t.entity_id AS "entityId",
           COUNT(e.id)::bigint AS "totalEvents",
           COALESCE(SUM(CASE WHEN e.event_type = 'error' THEN 1 ELSE 0 END), 0)::bigint AS "errorEvents"
-        FROM traces t
-        LEFT JOIN trace_events e ON e.trace_id = t.id
-        WHERE t.entity_id IN (:entityIds)
+        FROM trace_events e
+        JOIN traces t ON t.id = e.trace_id
+        WHERE e.entity_id IS NULL
+          AND t.entity_id IN (:entityIds)
         GROUP BY t.entity_id
+      ),
+      event_stats_agg AS (
+        SELECT
+          es."entityId",
+          SUM(es."totalEvents")::bigint AS "totalEvents",
+          SUM(es."errorEvents")::bigint AS "errorEvents"
+        FROM event_stats es
+        GROUP BY es."entityId"
       )
       SELECT
         ts."entityId",
@@ -77,7 +109,7 @@ async function getEntityMetrics(entityIds: string[]): Promise<Map<string, Entity
         COALESCE(es."errorEvents", 0)::bigint AS "errorEvents",
         ts."lastActiveAt"
       FROM trace_stats ts
-      LEFT JOIN event_stats es ON es."entityId" = ts."entityId"
+      LEFT JOIN event_stats_agg es ON es."entityId" = ts."entityId"
     `,
     {
       replacements: { entityIds },
@@ -93,7 +125,7 @@ async function getEntityMetrics(entityIds: string[]): Promise<Map<string, Entity
 }
 
 function buildAgentMetrics(
-  versions: Entity[],
+  versions: EntityVersionRef[],
   metricsByEntityId: Map<string, EntityMetricRow>
 ): Map<string, AggregatedAgentMetrics> {
   const statsByAgentId = new Map<string, { traceCount: number; totalEvents: number; errorEvents: number; lastActiveEpochMs: number | null }>();
@@ -548,20 +580,41 @@ app.get('/', async (c) => {
 
     const agentIds = agents.map((agent) => agent.id);
 
-    const versions = agentIds.length > 0
+    const metricVersions = agentIds.length > 0
       ? await Entity.findAll({
           where: { agentId: agentIds },
-          attributes: ['id', 'agentId', 'name', 'hash', 'metadata', 'samplingRate', 'createdAt', 'updatedAt'],
-          order: [['createdAt', 'DESC']],
+          attributes: ['id', 'agentId'],
         })
       : [];
 
-    const entityIds = versions.map((version) => version.id);
-    const metricsByEntityId = await getEntityMetrics(entityIds);
-    const agentMetrics = buildAgentMetrics(versions, metricsByEntityId);
+    const latestVersionRows = agentIds.length > 0
+      ? await Entity.sequelize!.query<LatestEntityVersionRow>(
+          `
+            SELECT DISTINCT ON (e.agent_id)
+              e.id,
+              e.agent_id AS "agentId",
+              e.hash,
+              e.sampling_rate AS "samplingRate",
+              e.created_at AS "createdAt",
+              e.updated_at AS "updatedAt"
+              ${includeMetadata ? ', e.metadata AS "metadata"' : ''}
+            FROM entities e
+            WHERE e.agent_id IN (:agentIds)
+            ORDER BY e.agent_id, e.created_at DESC
+          `,
+          {
+            replacements: { agentIds },
+            type: QueryTypes.SELECT,
+          }
+        )
+      : [];
 
-    const latestVersionByAgentId = new Map<string, Entity>();
-    for (const version of versions) {
+    const entityIds = metricVersions.map((version) => version.id);
+    const metricsByEntityId = await getEntityMetrics(entityIds);
+    const agentMetrics = buildAgentMetrics(metricVersions, metricsByEntityId);
+
+    const latestVersionByAgentId = new Map<string, LatestEntityVersionRow>();
+    for (const version of latestVersionRows) {
       if (!version.agentId) continue;
       if (!latestVersionByAgentId.has(version.agentId)) {
         latestVersionByAgentId.set(version.agentId, version);
@@ -589,8 +642,8 @@ app.get('/', async (c) => {
               hash: latestVersion.hash,
               metadata: includeMetadata ? latestVersion.metadata : undefined,
               samplingRate: Number(latestVersion.samplingRate),
-              createdAt: latestVersion.createdAt.toISOString(),
-              updatedAt: latestVersion.updatedAt.toISOString(),
+              createdAt: new Date(latestVersion.createdAt).toISOString(),
+              updatedAt: new Date(latestVersion.updatedAt).toISOString(),
             }
           : null,
       };
