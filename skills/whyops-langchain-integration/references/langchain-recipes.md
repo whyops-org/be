@@ -2,6 +2,30 @@
 
 Use these templates after reading `whyops-service-contract.md`.
 
+## 0) Mandatory Agent Init (All Modes)
+
+Call init before first traced traffic and whenever system prompt/tool schema changes.
+
+```bash
+curl -X POST "${WHYOPS_ANALYSE_URL%/}/api/entities/init" \
+  -H "Authorization: Bearer ${WHYOPS_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agentName": "'"${WHYOPS_AGENT_NAME}"'",
+    "metadata": {
+      "systemPrompt": "You are a concise assistant.",
+      "tools": [
+        {
+          "name": "search_docs",
+          "inputSchema": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}",
+          "outputSchema": "{\"type\":\"object\",\"properties\":{\"results\":{\"type\":\"array\"}}}",
+          "description": "Search internal docs."
+        }
+      ]
+    }
+  }'
+```
+
 ## 1) Proxy Mode (Preferred)
 
 Use proxy mode when you can route model traffic through `whyops-proxy`.
@@ -46,7 +70,31 @@ print(resp.content)
 
 Notes:
 - `api_key`, `base_url`, and `default_headers` are supported `ChatOpenAI` init args.
-- Proxy captures telemetry automatically; do not add manual emits unless requested.
+- Proxy captures core LLM telemetry automatically.
+- Integration policy requires manual emits for `tool_call_request` and `tool_call_response` even in proxy mode.
+- If your app also calls embeddings APIs, emit `embedding_request` and `embedding_response` manually.
+
+### Proxy mode manual supplement (required)
+
+Even in proxy mode, keep a lightweight emitter for tool/embedding events:
+
+```ts
+await emitWhyOpsEvent({
+  eventType: "tool_call_request",
+  traceId,
+  agentName: process.env.WHYOPS_AGENT_NAME!,
+  content: { toolCalls: [{ name: toolName, arguments: toolArgs }] },
+  metadata: { tool: toolName },
+});
+
+await emitWhyOpsEvent({
+  eventType: "tool_call_response",
+  traceId,
+  agentName: process.env.WHYOPS_AGENT_NAME!,
+  content: { toolResults: [{ name: toolName, output: toolOutput }] },
+  metadata: { tool: toolName },
+});
+```
 
 ### TypeScript (`@langchain/openai`)
 
@@ -97,9 +145,11 @@ Use manual mode when proxy cannot be used. Keep provider traffic direct, and emi
 - `on_chat_model_end` -> `llm_response`
 - `on_tool_start` -> `tool_call_request` (`metadata.tool` required)
 - `on_tool_end` -> `tool_call_response` (`metadata.tool` required)
+- embedding request wrapper -> `embedding_request`
+- embedding response wrapper -> `embedding_response`
 - any `*_error` -> `error`
 
-For `llm_response`, always include:
+For `llm_response` and `embedding_response`, always include:
 - `metadata.model`
 - `metadata.provider`
 
@@ -126,6 +176,8 @@ type WhyOpsEventType =
   | "user_message"
   | "tool_result"
   | "llm_response"
+  | "embedding_request"
+  | "embedding_response"
   | "tool_call_request"
   | "tool_call_response"
   | "llm_thinking"
@@ -197,6 +249,25 @@ for await (const ev of chain.streamEvents(input, { version: "v2" })) {
     });
   }
 }
+
+// For embeddings usage, wrap your embeddings client calls:
+await emitWhyOpsEvent("embedding_request", {
+  eventType: "embedding_request",
+  traceId,
+  agentName: process.env.WHYOPS_AGENT_NAME!,
+  metadata: { model: "text-embedding-3-small", provider: "openai" },
+  content: { input: "example text" },
+});
+
+// ... call provider embeddings API ...
+
+await emitWhyOpsEvent("embedding_response", {
+  eventType: "embedding_response",
+  traceId,
+  agentName: process.env.WHYOPS_AGENT_NAME!,
+  metadata: { model: "text-embedding-3-small", provider: "openai" },
+  content: { embeddingCount: 1, firstEmbeddingDimensions: 1536 },
+});
 ```
 
 ### Python emitter + `astream_events` mapping
@@ -273,12 +344,20 @@ async for ev in chain.astream_events(input_data, version="v2"):
 ## 3) Verification Checklist
 
 1. Run one end-to-end LangChain request.
-2. Capture the trace ID used by the app.
+2. Confirm mandatory init call completed successfully:
+   - `POST {WHYOPS_ANALYSE_URL}/api/entities/init`
+3. Capture the trace ID used by the app.
 3. Confirm event ingestion:
    - `GET {WHYOPS_ANALYSE_URL}/api/events?traceId=<TRACE_ID>&include=metadata`
 4. Confirm event sequence includes at least:
    - `user_message`
    - `llm_response`
-5. If tools run, confirm both:
+5. Confirm proxy mode still emits manually:
    - `tool_call_request`
    - `tool_call_response`
+6. If tools run, confirm both:
+   - `tool_call_request`
+   - `tool_call_response`
+7. If embeddings run, confirm both:
+   - `embedding_request`
+   - `embedding_response`

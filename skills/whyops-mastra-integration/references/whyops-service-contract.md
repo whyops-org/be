@@ -61,8 +61,13 @@ Use this as the source of truth for skill output.
 - `POST /api/events/ingest`: async enqueue path (recommended for manual mode).
 - `POST /api/events`: direct sync create path.
 - `POST /api/events/tool-result`: convenience route that forces `eventType=tool_call_response`.
+- `POST /api/entities/init`: register/update agent version metadata (`agentName`, `metadata.systemPrompt`, `metadata.tools[]`).
 - `GET /api/events/help`: event schema and required metadata guidance.
 - `GET /api/events?traceId=...`: retrieve ingested events.
+
+### Agent initialization requirement
+- `POST /api/entities/init` is mandatory before sending runtime events for a newly integrated agent.
+- Re-run `init` whenever system prompt or tool schema changes.
 
 ### Auth requirements
 - Analyse APIs run unified auth middleware and reject unauthenticated requests.
@@ -75,6 +80,8 @@ Use this as the source of truth for skill output.
 - Supported `eventType`:
   - `user_message`
   - `llm_response`
+  - `embedding_request`
+  - `embedding_response`
   - `llm_thinking`
   - `tool_call`
   - `tool_call_request`
@@ -96,6 +103,9 @@ Use this as the source of truth for skill output.
 - `llm_response` must include:
   - `metadata.model`
   - `metadata.provider`
+- `embedding_response` must include:
+  - `metadata.model`
+  - `metadata.provider`
 - `tool_call_request` and `tool_call_response` must include:
   - `metadata.tool`
 - If auth context cannot resolve `userId/projectId/environmentId`, ingest fails.
@@ -107,6 +117,7 @@ Use this as the source of truth for skill output.
 
 ## 4) Practical Integration Implications
 
-- Proxy mode only needs Mastra model configuration changes and correct headers.
+- Always call `POST /api/entities/init` before traffic and after prompt/tool contract changes.
+- Proxy mode handles core LLM events, but integration policy requires manual emission of `tool_call_request` and `tool_call_response` (and embedding events when applicable).
 - Manual mode must map runtime events to WhyOps schema with required metadata and include both payload `traceId` + trace header.
 - Always propagate one trace ID across model/tool events for each user execution path.

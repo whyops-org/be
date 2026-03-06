@@ -1,4 +1,4 @@
 interface:
   display_name: "WhyOps LangChain Integration"
-  short_description: "Integrate WhyOps into LangChain"
-  default_prompt: "Use $whyops-langchain-integration to add WhyOps proxy or manual events instrumentation to this LangChain app."
+  short_description: "Integrate WhyOps into LangChain with mandatory init and full event coverage"
+  default_prompt: "Use $whyops-langchain-integration to integrate WhyOps in LangChain with mandatory /api/entities/init, manual tool request/response events even in proxy mode, and embedding event coverage."
