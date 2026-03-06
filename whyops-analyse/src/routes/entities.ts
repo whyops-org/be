@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import { QueryTypes } from 'sequelize';
 import { z } from 'zod';
 import { EntityService } from '../services/entity.service';
+import { getDefaultAgentRuntimeLimits, hasAgentRuntimeColumns } from '../utils/agent-runtime';
 import { parseInclude } from '../utils/query';
 
 const logger = createServiceLogger('analyse:entities');
@@ -640,6 +641,8 @@ app.get('/', async (c) => {
     }
 
     const agentIds = agents.map((agent) => agent.id);
+    const hasRuntimeColumns = await hasAgentRuntimeColumns();
+    const defaultRuntimeLimits = getDefaultAgentRuntimeLimits();
 
     const metricVersions = agentIds.length > 0
       ? await Entity.findAll({
@@ -682,20 +685,24 @@ app.get('/', async (c) => {
       }
     }
 
-    const agentRuntimeRows = await Agent.findAll({
-      where: { id: agentIds },
-      attributes: ['id', 'maxTraces', 'maxSpans'],
-    });
-    const runtimeByAgentId = new Map<string, AgentRuntimeRow>(
-      agentRuntimeRows.map((row) => [
-        row.id,
-        {
-          id: row.id,
-          maxTraces: Number((row as any).maxTraces || 0),
-          maxSpans: Number((row as any).maxSpans || 0),
-        },
-      ])
-    );
+    let runtimeByAgentId = new Map<string, AgentRuntimeRow>();
+
+    if (hasRuntimeColumns && agentIds.length > 0) {
+      const agentRuntimeRows = await Agent.findAll({
+        where: { id: agentIds },
+        attributes: ['id', 'maxTraces', 'maxSpans'],
+      });
+      runtimeByAgentId = new Map<string, AgentRuntimeRow>(
+        agentRuntimeRows.map((row) => [
+          row.id,
+          {
+            id: row.id,
+            maxTraces: Number((row as any).maxTraces || defaultRuntimeLimits.maxTraces),
+            maxSpans: Number((row as any).maxSpans || defaultRuntimeLimits.maxSpans),
+          },
+        ])
+      );
+    }
 
     const items = agents.map((agent) => {
       const latestVersion = latestVersionByAgentId.get(agent.id);
@@ -708,8 +715,8 @@ app.get('/', async (c) => {
         projectId: agent.projectId,
         environmentId: agent.environmentId,
         name: agent.name,
-        maxTraces: runtime?.maxTraces ? Number(runtime.maxTraces) : undefined,
-        maxSpans: runtime?.maxSpans ? Number(runtime.maxSpans) : undefined,
+        maxTraces: runtime ? Number(runtime.maxTraces) : defaultRuntimeLimits.maxTraces,
+        maxSpans: runtime ? Number(runtime.maxSpans) : defaultRuntimeLimits.maxSpans,
         traceCount: metrics?.traceCount ?? 0,
         successPercentage: metrics?.successPercentage ?? 100,
         lastActive: metrics?.lastActive ?? null,
@@ -760,6 +767,9 @@ app.get('/:id', async (c) => {
       return c.json({ success: false, error: 'Unauthorized: authentication required' }, 401);
         }
 
+        const hasRuntimeColumns = await hasAgentRuntimeColumns();
+        const defaultRuntimeLimits = getDefaultAgentRuntimeLimits();
+
         const successRatePeriod = Math.min(
           Math.max(parseInt(c.req.query('successRatePeriod') || '7', 10) || 7, 1),
           3650
@@ -779,7 +789,16 @@ app.get('/:id', async (c) => {
                 projectId: auth.projectId,
                 environmentId: auth.environmentId,
             },
-            attributes: ['id', 'userId', 'projectId', 'environmentId', 'name', 'maxTraces', 'maxSpans', 'createdAt', 'updatedAt'],
+            attributes: [
+              'id',
+              'userId',
+              'projectId',
+              'environmentId',
+              'name',
+              ...(hasRuntimeColumns ? (['maxTraces', 'maxSpans'] as const) : []),
+              'createdAt',
+              'updatedAt',
+            ],
         });
 
         if (!agent) {
@@ -788,7 +807,16 @@ app.get('/:id', async (c) => {
               id,
               userId: auth.userId,
             },
-            attributes: ['id', 'userId', 'projectId', 'environmentId', 'name', 'maxTraces', 'maxSpans', 'createdAt', 'updatedAt'],
+            attributes: [
+              'id',
+              'userId',
+              'projectId',
+              'environmentId',
+              'name',
+              ...(hasRuntimeColumns ? (['maxTraces', 'maxSpans'] as const) : []),
+              'createdAt',
+              'updatedAt',
+            ],
           });
 
           if (fallbackAgent) {
@@ -827,8 +855,12 @@ app.get('/:id', async (c) => {
             projectId: agent.projectId,
             environmentId: agent.environmentId,
             name: agent.name,
-            maxTraces: Number((agent as any).maxTraces || 0) || undefined,
-            maxSpans: Number((agent as any).maxSpans || 0) || undefined,
+            maxTraces: hasRuntimeColumns
+              ? Number((agent as any).maxTraces || defaultRuntimeLimits.maxTraces)
+              : defaultRuntimeLimits.maxTraces,
+            maxSpans: hasRuntimeColumns
+              ? Number((agent as any).maxSpans || defaultRuntimeLimits.maxSpans)
+              : defaultRuntimeLimits.maxSpans,
             traceCount: agentMetrics.traceCount,
             successPercentage: successPercentageByDate,
             successRatePeriod,

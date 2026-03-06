@@ -1036,7 +1036,7 @@ export class AgentAnalysisService {
         projectId: input.projectId,
         environmentId: input.environmentId,
       },
-      attributes: ['id'],
+      attributes: ['id', 'name', 'userId', 'projectId', 'environmentId', 'createdAt', 'updatedAt'],
     });
 
     if (!agent) {
@@ -1111,7 +1111,7 @@ export class AgentAnalysisService {
         projectId: input.projectId,
         environmentId: input.environmentId,
       },
-      attributes: ['id', 'name'],
+      attributes: ['id', 'name', 'userId', 'projectId', 'environmentId', 'createdAt', 'updatedAt'],
     });
 
     if (!agent) {

@@ -3,6 +3,7 @@ import env from '@whyops/shared/env';
 import { Agent, Entity, Trace } from '@whyops/shared/models';
 import CryptoJS from 'crypto-js';
 import { QueryTypes } from 'sequelize';
+import { getDefaultAgentRuntimeLimits, hasAgentRuntimeColumns } from '../utils/agent-runtime';
 
 const logger = createServiceLogger('analyse:sampling-service');
 
@@ -21,6 +22,49 @@ export interface AgentSpanLimitResult {
 }
 
 export class SamplingService {
+  private static async findAgentForLimits(input: {
+    agentId: string;
+    userId: string;
+    projectId: string;
+    environmentId: string;
+    includeMaxSpans?: boolean;
+  }): Promise<{ id: string; maxTraces?: number; maxSpans?: number } | null> {
+    const runtimeColumnsAvailable = await hasAgentRuntimeColumns();
+    const requestedRuntimeFields = [
+      'maxTraces',
+      ...(input.includeMaxSpans ? (['maxSpans'] as const) : []),
+    ];
+
+    const agent = await Agent.findOne({
+      where: {
+        id: input.agentId,
+        userId: input.userId,
+        projectId: input.projectId,
+        environmentId: input.environmentId,
+      },
+      attributes: [
+        'id',
+        ...(runtimeColumnsAvailable ? requestedRuntimeFields : []),
+        'userId',
+        'projectId',
+        'environmentId',
+        'name',
+        'createdAt',
+        'updatedAt',
+      ],
+    });
+
+    if (!agent) return null;
+
+    return {
+      id: agent.id,
+      maxTraces: runtimeColumnsAvailable ? Number((agent as any).maxTraces || 0) : undefined,
+      maxSpans: runtimeColumnsAvailable && input.includeMaxSpans
+        ? Number((agent as any).maxSpans || 0)
+        : undefined,
+    };
+  }
+
   /**
    * Determines if a trace should be sampled based on entity's sampling rate.
    * Uses deterministic hash-based sampling for consistency.
@@ -46,6 +90,9 @@ export class SamplingService {
       });
 
       if (entity) {
+        const runtimeColumnsAvailable = await hasAgentRuntimeColumns();
+        const runtimeDefaults = getDefaultAgentRuntimeLimits();
+
         const sampledTracesForEntity = await Trace.count({
           where: {
             entityId: entity.id,
@@ -61,20 +108,14 @@ export class SamplingService {
           };
         }
 
-        if (entity.agentId) {
-          const agent = await Agent.findOne({
-            where: {
-              id: entity.agentId,
-              userId,
-              projectId,
-              environmentId,
-            },
-            attributes: ['id', 'maxTraces'],
+        if (entity.agentId && runtimeColumnsAvailable) {
+          const agent = await this.findAgentForLimits({
+            agentId: entity.agentId,
+            userId,
+            projectId,
+            environmentId,
           });
-          const maxTracesForAgent = Math.max(
-            1,
-            Number(agent?.maxTraces || env.MAX_TRACES_PER_AGENT)
-          );
+          const maxTracesForAgent = Math.max(1, Number(agent?.maxTraces || runtimeDefaults.maxTraces));
 
           const rows = await Entity.sequelize!.query<{ traceCount: string | number }>(
             `
@@ -146,6 +187,16 @@ export class SamplingService {
     }
 
     try {
+      const runtimeColumnsAvailable = await hasAgentRuntimeColumns();
+      const runtimeDefaults = getDefaultAgentRuntimeLimits();
+
+      if (!runtimeColumnsAvailable) {
+        return {
+          allowed: true,
+          maxSpans: runtimeDefaults.maxSpans,
+        };
+      }
+
       const entity = await Entity.findOne({
         where: { userId, projectId, environmentId, name: entityName },
         order: [['createdAt', 'DESC']],
@@ -156,21 +207,19 @@ export class SamplingService {
         return { allowed: true };
       }
 
-      const agent = await Agent.findOne({
-        where: {
-          id: entity.agentId,
-          userId,
-          projectId,
-          environmentId,
-        },
-        attributes: ['id', 'maxSpans'],
+      const agent = await this.findAgentForLimits({
+        agentId: entity.agentId,
+        userId,
+        projectId,
+        environmentId,
+        includeMaxSpans: true,
       });
 
       if (!agent) {
         return { allowed: true };
       }
 
-      const maxSpans = Math.max(1, Number(agent.maxSpans || env.MAX_SPANS_PER_AGENT));
+      const maxSpans = Math.max(1, Number(agent.maxSpans || runtimeDefaults.maxSpans));
 
       if (spanId) {
         const existingSpanRows = await Trace.sequelize!.query<{ exists: boolean }>(

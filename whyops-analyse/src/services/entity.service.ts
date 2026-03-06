@@ -3,6 +3,7 @@ import env from '@whyops/shared/env';
 import { Agent, ApiKey, Entity, LLMEvent, Project, Trace } from '@whyops/shared/models';
 import { createHash } from 'crypto';
 import { Op } from 'sequelize';
+import { getDefaultAgentRuntimeLimits, hasAgentRuntimeColumns } from '../utils/agent-runtime';
 
 const logger = createServiceLogger('analyse:entity-service');
 
@@ -57,6 +58,7 @@ export class EntityService {
           environmentId: input.environmentId,
           name: input.agentName,
         },
+        attributes: ['id', 'userId', 'projectId', 'environmentId', 'name', 'createdAt', 'updatedAt'],
         transaction,
         lock: transaction.LOCK.UPDATE,
       });
@@ -82,14 +84,21 @@ export class EntityService {
           throw error;
         }
 
+        const runtimeDefaults = getDefaultAgentRuntimeLimits();
+        const runtimeColumnsAvailable = await hasAgentRuntimeColumns();
+
         agent = await Agent.create(
           {
             userId: input.userId,
             projectId: input.projectId,
             environmentId: input.environmentId,
             name: input.agentName,
-            maxTraces: env.MAX_TRACES_PER_AGENT,
-            maxSpans: env.MAX_SPANS_PER_AGENT,
+            ...(runtimeColumnsAvailable
+              ? {
+                  maxTraces: runtimeDefaults.maxTraces,
+                  maxSpans: runtimeDefaults.maxSpans,
+                }
+              : {}),
           },
           { transaction }
         );
@@ -161,6 +170,7 @@ export class EntityService {
           environmentId,
           name: agentName,
         },
+        attributes: ['id', 'userId', 'projectId', 'environmentId', 'name', 'createdAt', 'updatedAt'],
       });
 
       if (!agent) {
@@ -288,6 +298,7 @@ export class EntityService {
           projectId: input.projectId,
           environmentId: input.environmentId,
         },
+        attributes: ['id', 'userId', 'projectId', 'environmentId', 'name', 'createdAt', 'updatedAt'],
       });
 
       if (!agent) {
@@ -353,6 +364,7 @@ export class EntityService {
             projectId: input.projectId,
             environmentId: input.environmentId,
           },
+          attributes: ['id', 'userId', 'projectId', 'environmentId', 'name', 'createdAt', 'updatedAt'],
           transaction,
           lock: transaction.LOCK.UPDATE,
         });

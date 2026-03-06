@@ -1,5 +1,6 @@
 import env from '@whyops/shared/env';
 import { Agent, Entity } from '@whyops/shared/models';
+import { getDefaultAgentRuntimeLimits, hasAgentRuntimeColumns } from '../utils/agent-runtime';
 
 export interface AgentSettingsRecord {
   agentId: string;
@@ -39,6 +40,9 @@ export class AgentSettingsService {
     environmentId: string;
     agentId: string;
   }): Promise<AgentSettingsRecord | null> {
+    const runtimeColumnsAvailable = await hasAgentRuntimeColumns();
+    const runtimeDefaults = getDefaultAgentRuntimeLimits();
+
     const agent = await Agent.findOne({
       where: {
         id: input.agentId,
@@ -46,7 +50,11 @@ export class AgentSettingsService {
         projectId: input.projectId,
         environmentId: input.environmentId,
       },
-      attributes: ['id', 'maxTraces', 'maxSpans', 'updatedAt'],
+      attributes: [
+        'id',
+        ...(runtimeColumnsAvailable ? ['maxTraces', 'maxSpans'] : []),
+        'updatedAt',
+      ],
     });
 
     if (!agent) {
@@ -61,8 +69,12 @@ export class AgentSettingsService {
 
     return {
       agentId: agent.id,
-      maxTraces: normalizePositiveInteger(Number(agent.maxTraces || env.MAX_TRACES_PER_AGENT)),
-      maxSpans: normalizePositiveInteger(Number(agent.maxSpans || env.MAX_SPANS_PER_AGENT)),
+      maxTraces: runtimeColumnsAvailable
+        ? normalizePositiveInteger(Number((agent as any).maxTraces || runtimeDefaults.maxTraces))
+        : runtimeDefaults.maxTraces,
+      maxSpans: runtimeColumnsAvailable
+        ? normalizePositiveInteger(Number((agent as any).maxSpans || runtimeDefaults.maxSpans))
+        : runtimeDefaults.maxSpans,
       samplingRate: normalizeSamplingRate(
         Number(latestVersion?.samplingRate ?? env.DEFAULT_TRACE_SAMPLING_RATE)
       ),
@@ -79,6 +91,9 @@ export class AgentSettingsService {
     maxSpans?: number;
     samplingRate?: number;
   }): Promise<AgentSettingsRecord | null> {
+    const runtimeColumnsAvailable = await hasAgentRuntimeColumns();
+    const runtimeDefaults = getDefaultAgentRuntimeLimits();
+
     return Agent.sequelize!.transaction(async (transaction) => {
       const agent = await Agent.findOne({
         where: {
@@ -98,20 +113,26 @@ export class AgentSettingsService {
       const nextMaxTraces =
         typeof input.maxTraces === 'number'
           ? normalizePositiveInteger(input.maxTraces)
-          : normalizePositiveInteger(Number(agent.maxTraces || env.MAX_TRACES_PER_AGENT));
+          : runtimeColumnsAvailable
+            ? normalizePositiveInteger(Number((agent as any).maxTraces || runtimeDefaults.maxTraces))
+            : runtimeDefaults.maxTraces;
 
       const nextMaxSpans =
         typeof input.maxSpans === 'number'
           ? normalizePositiveInteger(input.maxSpans)
-          : normalizePositiveInteger(Number(agent.maxSpans || env.MAX_SPANS_PER_AGENT));
+          : runtimeColumnsAvailable
+            ? normalizePositiveInteger(Number((agent as any).maxSpans || runtimeDefaults.maxSpans))
+            : runtimeDefaults.maxSpans;
 
-      await agent.update(
-        {
-          maxTraces: nextMaxTraces,
-          maxSpans: nextMaxSpans,
-        },
-        { transaction }
-      );
+      if (runtimeColumnsAvailable) {
+        await agent.update(
+          {
+            maxTraces: nextMaxTraces,
+            maxSpans: nextMaxSpans,
+          },
+          { transaction }
+        );
+      }
 
       let nextSamplingRate: number;
       if (typeof input.samplingRate === 'number') {
