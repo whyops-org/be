@@ -102,6 +102,16 @@ export class AgentSettingsService {
           projectId: input.projectId,
           environmentId: input.environmentId,
         },
+        attributes: [
+          'id',
+          ...(runtimeColumnsAvailable ? (['maxTraces', 'maxSpans'] as const) : []),
+          'userId',
+          'projectId',
+          'environmentId',
+          'name',
+          'createdAt',
+          'updatedAt',
+        ],
         transaction,
         lock: transaction.LOCK.UPDATE,
       });
