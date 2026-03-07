@@ -1,14 +1,21 @@
 import { createServiceLogger } from '@whyops/shared/logger';
+import env from '@whyops/shared/env';
 import type { Context, Next } from 'hono';
 import type { AuthMiddlewareConfig, UnifiedAuthContext, SessionUser, UserSession } from './types';
 import { extractApiKey } from './api-key-extractor';
 import type { BetterAuthSession } from './auth-utils';
-import { getSessionAuthContext, loadUserSession, loadUserSessionFromBetterAuth, validateApiKey } from './auth-utils';
+import { getSessionAuthContext, loadUserSession, loadUserSessionFast, loadUserSessionFromBetterAuth, validateApiKey } from './auth-utils';
 
 const logger = createServiceLogger('middleware:auth');
 const LOCAL_SESSION_CACHE_TTL_MS = 10_000;
+const SESSION_AUTH_CONTEXT_CACHE_TTL_MS = env.AUTH_MIDDLEWARE_SESSION_CONTEXT_CACHE_TTL_MS;
 const localSessionCache = new Map<string, { expiresAtMs: number; session: unknown | null }>();
 const localSessionInFlight = new Map<string, Promise<unknown | null>>();
+const localSessionAuthContextCache = new Map<
+  string,
+  { expiresAtMs: number; context: UnifiedAuthContext | null }
+>();
+const localSessionAuthContextInFlight = new Map<string, Promise<UnifiedAuthContext | null>>();
 
 const defaultConfig: AuthMiddlewareConfig = {
   requireAuth: false,
@@ -16,13 +23,58 @@ const defaultConfig: AuthMiddlewareConfig = {
   enableApiKeyAuth: true,
   enableSessionAuth: true,
   requireProjectEnv: true,
+  hydrateSessionUserFromDb: true,
 };
+
+function getCachedSessionAuthContext(userId: string): UnifiedAuthContext | null | undefined {
+  const cached = localSessionAuthContextCache.get(userId);
+  if (!cached) return undefined;
+  if (Date.now() > cached.expiresAtMs) {
+    localSessionAuthContextCache.delete(userId);
+    return undefined;
+  }
+  return cached.context;
+}
+
+function setCachedSessionAuthContext(userId: string, context: UnifiedAuthContext | null): void {
+  localSessionAuthContextCache.set(userId, {
+    expiresAtMs: Date.now() + SESSION_AUTH_CONTEXT_CACHE_TTL_MS,
+    context,
+  });
+}
+
+async function resolveSessionAuthContext(userId: string): Promise<UnifiedAuthContext | null> {
+  const cached = getCachedSessionAuthContext(userId);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const existingInFlight = localSessionAuthContextInFlight.get(userId);
+  if (existingInFlight) {
+    return existingInFlight;
+  }
+
+  const fetchPromise = (async () => {
+    const context = await getSessionAuthContext(userId);
+    setCachedSessionAuthContext(userId, context ?? null);
+    return context ?? null;
+  })();
+
+  localSessionAuthContextInFlight.set(userId, fetchPromise);
+
+  try {
+    return await fetchPromise;
+  } finally {
+    localSessionAuthContextInFlight.delete(userId);
+  }
+}
 
 declare module 'hono' {
   interface ContextVariableMap {
     whyopsAuth: UnifiedAuthContext;
     sessionUser: SessionUser | null;
     sessionData: UserSession['session'] | null;
+    authDurationMs: number;
   }
 }
 
@@ -30,90 +82,101 @@ export function createAuthMiddleware(config: Partial<AuthMiddlewareConfig> = {})
   const finalConfig = { ...defaultConfig, ...config };
 
   return async function unifiedAuthMiddleware(c: Context, next: Next) {
-    if (finalConfig.skipPaths?.some((path) => c.req.path === path || c.req.path.startsWith(path))) {
-      await next();
-      return;
-    }
+    const authStartedAt = performance.now();
 
-    if (c.get('whyopsAuth')) {
-      await next();
-      return;
-    }
-
-    if (finalConfig.enableApiKeyAuth) {
-      const apiKey = await extractApiKey(c);
-
-      if (apiKey) {
-        const result = await validateApiKey(apiKey);
-
-        if (result.valid && result.context) {
-          c.set('whyopsAuth', result.context);
-          logger.debug(
-            {
-              userId: result.context.userId,
-              projectId: result.context.projectId,
-              authType: 'api_key',
-            },
-            'Request authenticated via API key'
-          );
-          await next();
-          return;
-        }
-
-        if (finalConfig.requireAuth && !finalConfig.enableSessionAuth) {
-          return c.json({ error: `Unauthorized: ${result.error}` }, 401);
-        }
+    try {
+      if (finalConfig.skipPaths?.some((path) => c.req.path === path || c.req.path.startsWith(path))) {
+        await next();
+        return;
       }
-    }
 
-    if (finalConfig.enableSessionAuth) {
-      const sessionData = await loadUserSession(c);
+      if (c.get('whyopsAuth')) {
+        await next();
+        return;
+      }
 
-      if (sessionData) {
-        c.set('sessionUser', sessionData.user);
-        c.set('sessionData', sessionData.session);
+      if (finalConfig.enableApiKeyAuth) {
+        const apiKey = await extractApiKey(c);
 
-        if (finalConfig.requireProjectEnv) {
-          const authContext = await getSessionAuthContext(sessionData.user.id);
+        if (apiKey) {
+          const result = await validateApiKey(apiKey);
 
-          if (authContext) {
-            authContext.sessionId = sessionData.session.id;
-            authContext.userEmail = sessionData.user.email;
-            authContext.userName = sessionData.user.name;
-            c.set('whyopsAuth', authContext);
+          if (result.valid && result.context) {
+            c.set('whyopsAuth', result.context);
             logger.debug(
               {
-                userId: authContext.userId,
-                projectId: authContext.projectId,
-                authType: 'session',
+                userId: result.context.userId,
+                projectId: result.context.projectId,
+                authType: 'api_key',
               },
-              'Request authenticated via session'
+              'Request authenticated via API key'
             );
             await next();
             return;
           }
-        } else {
-          c.set('whyopsAuth', {
-            authType: 'session',
-            userId: sessionData.user.id,
-            projectId: '',
-            environmentId: '',
-            isMaster: true,
-            sessionId: sessionData.session.id,
-            userEmail: sessionData.user.email,
-            userName: sessionData.user.name,
-          });
-          await next();
-          return;
+
+          if (finalConfig.requireAuth && !finalConfig.enableSessionAuth) {
+            return c.json({ error: `Unauthorized: ${result.error}` }, 401);
+          }
         }
       }
-    }
 
-    if (finalConfig.requireAuth) {
-      return c.json({ error: 'Unauthorized: Authentication required' }, 401);
-    }
+      if (finalConfig.enableSessionAuth) {
+        const sessionData = finalConfig.hydrateSessionUserFromDb
+          ? await loadUserSession(c)
+          : await loadUserSessionFast(c);
 
-    await next();
+        if (sessionData) {
+          c.set('sessionUser', sessionData.user);
+          c.set('sessionData', sessionData.session);
+
+          if (finalConfig.requireProjectEnv) {
+            const authContext = await resolveSessionAuthContext(sessionData.user.id);
+
+            if (authContext && authContext.authType === 'session') {
+              const sessionContext = {
+                ...authContext,
+                sessionId: sessionData.session.id,
+                userEmail: sessionData.user.email,
+                userName: sessionData.user.name,
+              };
+              c.set('whyopsAuth', sessionContext);
+              logger.debug(
+                {
+                  userId: sessionContext.userId,
+                  projectId: sessionContext.projectId,
+                  authType: 'session',
+                },
+                'Request authenticated via session'
+              );
+              await next();
+              return;
+            }
+          } else {
+            c.set('whyopsAuth', {
+              authType: 'session',
+              userId: sessionData.user.id,
+              projectId: '',
+              environmentId: '',
+              isMaster: true,
+              sessionId: sessionData.session.id,
+              userEmail: sessionData.user.email,
+              userName: sessionData.user.name,
+            });
+            await next();
+            return;
+          }
+        }
+      }
+
+      if (finalConfig.requireAuth) {
+        return c.json({ error: 'Unauthorized: Authentication required' }, 401);
+      }
+
+      await next();
+    } finally {
+      c.set('authDurationMs', performance.now() - authStartedAt);
+    }
   };
 }
 

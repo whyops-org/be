@@ -1,7 +1,13 @@
 import { zValidator } from '@hono/zod-validator';
 import { createServiceLogger } from '@whyops/shared/logger';
 import { Agent, Entity } from '@whyops/shared/models';
-import { invalidateApiKeyAuthCacheById } from '@whyops/shared/services';
+import {
+  invalidateApiKeyAuthCacheById,
+  prefixedRedisKey,
+  redisDeleteByPattern,
+  redisGetJson,
+  redisSetJson,
+} from '@whyops/shared/services';
 import { Hono } from 'hono';
 import { QueryTypes } from 'sequelize';
 import { z } from 'zod';
@@ -13,6 +19,42 @@ const logger = createServiceLogger('analyse:entities');
 const app = new Hono();
 const ENTITIES_LIST_CACHE_TTL_MS = 15_000;
 const entitiesListCache = new Map<string, { expiresAtMs: number; payload: unknown }>();
+
+function getEntitiesListLocalCacheKey(input: {
+  userId: string;
+  projectId: string;
+  environmentId: string;
+  page: number;
+  count: number;
+  includeMetadata: boolean;
+}): string {
+  return `${input.userId}:${input.projectId}:${input.environmentId}:${input.page}:${input.count}:${input.includeMetadata ? 1 : 0}`;
+}
+
+function getEntitiesListRedisCacheKey(input: {
+  userId: string;
+  projectId: string;
+  environmentId: string;
+  page: number;
+  count: number;
+  includeMetadata: boolean;
+}): string {
+  return prefixedRedisKey(
+    'analyse',
+    'entities',
+    input.userId,
+    input.projectId,
+    input.environmentId,
+    input.page,
+    input.count,
+    input.includeMetadata ? 'metadata' : 'no-metadata'
+  );
+}
+
+async function invalidateEntitiesCachesForUser(userId: string): Promise<void> {
+  entitiesListCache.clear();
+  await redisDeleteByPattern(prefixedRedisKey('analyse', 'entities', userId, '*'), 10_000);
+}
 
 interface EntityMetricRow {
   entityId: string;
@@ -366,6 +408,8 @@ app.post('/init', zValidator('json', entityInitSchema), async (c) => {
       'Agent init completed'
     );
 
+    await invalidateEntitiesCachesForUser(auth.userId);
+
     return c.json(
       {
         success: true,
@@ -420,6 +464,8 @@ app.patch('/:id/sampling-rate', zValidator('json', updateSamplingRateSchema), as
       return c.json({ success: false, error: 'Agent not found' }, 404);
     }
 
+    await invalidateEntitiesCachesForUser(auth.userId);
+
     return c.json({
       success: true,
       agentId: result.agent.id,
@@ -456,7 +502,7 @@ app.delete('/:id', zValidator('param', agentIdParamsSchema), async (c) => {
       return c.json({ success: false, error: 'Agent not found' }, 404);
     }
 
-    entitiesListCache.clear();
+    await invalidateEntitiesCachesForUser(auth.userId);
     await Promise.all(
       result.invalidatedApiKeyIds.map((apiKeyId) => invalidateApiKeyAuthCacheById(apiKeyId))
     );
@@ -589,17 +635,48 @@ app.get('/', async (c) => {
   }
 
   try {
+    const endpointStartedAt = performance.now();
     const count = Math.min(Math.max(parseInt(c.req.query('count') || '20', 10) || 20, 1), 100);
     const page = Math.max(parseInt(c.req.query('page') || '1', 10) || 1, 1);
     const offset = (page - 1) * count;
     const include = parseInclude(c.req.query('include'));
     const includeMetadata = include.has('metadata');
-    const cacheKey = `${auth.userId}:${auth.projectId}:${auth.environmentId}:${page}:${count}:${includeMetadata ? 1 : 0}`;
+    const localCacheKey = getEntitiesListLocalCacheKey({
+      userId: auth.userId,
+      projectId: auth.projectId,
+      environmentId: auth.environmentId,
+      page,
+      count,
+      includeMetadata,
+    });
+    const redisCacheKey = getEntitiesListRedisCacheKey({
+      userId: auth.userId,
+      projectId: auth.projectId,
+      environmentId: auth.environmentId,
+      page,
+      count,
+      includeMetadata,
+    });
 
-    const cached = entitiesListCache.get(cacheKey);
+    const cached = entitiesListCache.get(localCacheKey);
     if (cached && Date.now() <= cached.expiresAtMs) {
+      const endpointMs = performance.now() - endpointStartedAt;
+      c.header('Server-Timing', `entities-cache-local;dur=0, entities-total;dur=${endpointMs.toFixed(1)}`);
       return c.json(cached.payload);
     }
+
+    const redisCached = await redisGetJson<unknown>(redisCacheKey);
+    if (redisCached) {
+      entitiesListCache.set(localCacheKey, {
+        expiresAtMs: Date.now() + ENTITIES_LIST_CACHE_TTL_MS,
+        payload: redisCached,
+      });
+      const endpointMs = performance.now() - endpointStartedAt;
+      c.header('Server-Timing', `entities-cache-redis;dur=0, entities-total;dur=${endpointMs.toFixed(1)}`);
+      return c.json(redisCached);
+    }
+
+    const dbStartedAt = performance.now();
 
     const attributes = ['id', 'userId', 'projectId', 'environmentId', 'name', 'createdAt', 'updatedAt'] as const;
     let { rows: agents, count: total } = await Agent.findAndCountAll({
@@ -747,10 +824,16 @@ app.get('/', async (c) => {
       },
     };
 
-    entitiesListCache.set(cacheKey, {
+    entitiesListCache.set(localCacheKey, {
       expiresAtMs: Date.now() + ENTITIES_LIST_CACHE_TTL_MS,
       payload,
     });
+
+    await redisSetJson(redisCacheKey, payload, Math.ceil(ENTITIES_LIST_CACHE_TTL_MS / 1000));
+
+    const dbMs = performance.now() - dbStartedAt;
+    const endpointMs = performance.now() - endpointStartedAt;
+    c.header('Server-Timing', `entities-db;dur=${dbMs.toFixed(1)}, entities-total;dur=${endpointMs.toFixed(1)}`);
 
     return c.json(payload);
   } catch (error: any) {

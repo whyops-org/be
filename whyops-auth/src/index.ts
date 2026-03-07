@@ -50,6 +50,15 @@ if (!emailConfigured) {
 app.use('*', honoLogger());
 app.use('*', cors(getIntegrationCorsOptions()));
 
+app.use('/api/*', async (c, next) => {
+  const startedAt = performance.now();
+  await next();
+  const totalMs = performance.now() - startedAt;
+  const existing = c.res.headers.get('Server-Timing');
+  const values = [existing, `total;dur=${totalMs.toFixed(1)}`].filter(Boolean);
+  c.res.headers.set('Server-Timing', values.join(', '));
+});
+
 const magicLinkLimiter: MiddlewareHandler = async (c: Context, next) => {
   const ipHeader =
     c.req.header('x-forwarded-for') ||

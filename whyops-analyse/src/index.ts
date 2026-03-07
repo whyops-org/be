@@ -35,9 +35,26 @@ const analyseAuthMiddleware = createAuthMiddleware({
   enableApiKeyAuth: true,
   enableSessionAuth: true,
   requireProjectEnv: true,
+  hydrateSessionUserFromDb: false,
 });
 
 app.use('/api/*', analyseAuthMiddleware);
+
+app.use('/api/*', async (c, next) => {
+  const startedAt = performance.now();
+  await next();
+
+  const totalMs = performance.now() - startedAt;
+  const authMs = c.get('authDurationMs') ?? 0;
+  const existing = c.res.headers.get('Server-Timing');
+  const values = [
+    existing,
+    `auth;dur=${authMs.toFixed(1)}`,
+    `total;dur=${totalMs.toFixed(1)}`,
+  ].filter(Boolean);
+
+  c.res.headers.set('Server-Timing', values.join(', '));
+});
 
 app.use('/api/*', async (c, next) => {
   const auth = getAuthContext(c);

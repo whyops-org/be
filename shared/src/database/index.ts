@@ -40,7 +40,17 @@ export const sequelize = new Sequelize({
         rejectUnauthorized: env.DB_SSL_REJECT_UNAUTHORIZED,
       }) || undefined,
   },
-  logging: env.NODE_ENV === 'development' ? (msg) => logger.debug(msg) : false,
+  benchmark: true,
+  logging: (sql, timingMs) => {
+    if (env.NODE_ENV === 'development') {
+      logger.debug({ sql, timingMs }, 'SQL query executed');
+      return;
+    }
+
+    if (typeof timingMs === 'number' && timingMs >= env.DB_SLOW_QUERY_MS) {
+      logger.warn({ sql, timingMs }, 'Slow SQL query');
+    }
+  },
   pool: {
     max: env.DB_POOL_MAX,
     min: env.DB_POOL_MIN,

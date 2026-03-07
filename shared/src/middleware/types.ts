@@ -62,6 +62,7 @@ export interface AuthMiddlewareConfig {
   enableApiKeyAuth?: boolean;
   enableSessionAuth?: boolean;
   requireProjectEnv?: boolean;
+  hydrateSessionUserFromDb?: boolean;
 }
 
 export interface SessionValidationResult {

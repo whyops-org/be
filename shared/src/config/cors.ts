@@ -5,6 +5,7 @@ export interface WhyopsCorsOptions {
   allowMethods: string[];
   allowHeaders: string[];
   credentials: boolean;
+  maxAge: number;
 }
 
 export const WHYOPS_CORS_OPTIONS: WhyopsCorsOptions = {
@@ -12,6 +13,7 @@ export const WHYOPS_CORS_OPTIONS: WhyopsCorsOptions = {
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
+  maxAge: env.CORS_MAX_AGE_SEC,
 };
 
 export function getWhyopsCorsOptions(): WhyopsCorsOptions {
@@ -20,6 +22,7 @@ export function getWhyopsCorsOptions(): WhyopsCorsOptions {
     allowMethods: [...WHYOPS_CORS_OPTIONS.allowMethods],
     allowHeaders: [...WHYOPS_CORS_OPTIONS.allowHeaders],
     credentials: WHYOPS_CORS_OPTIONS.credentials,
+    maxAge: WHYOPS_CORS_OPTIONS.maxAge,
   };
 }
 
@@ -28,6 +31,7 @@ export interface IntegrationCorsOptions {
   allowMethods: string[];
   allowHeaders: string[];
   credentials: boolean;
+  maxAge: number;
 }
 
 export function getIntegrationCorsOptions(): IntegrationCorsOptions {
@@ -48,5 +52,6 @@ export function getIntegrationCorsOptions(): IntegrationCorsOptions {
       'X-Provider-Id',
     ],
     credentials: true,
+    maxAge: env.CORS_MAX_AGE_SEC,
   };
 }

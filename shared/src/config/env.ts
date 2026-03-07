@@ -37,6 +37,7 @@ const envSchema = z.object({
   DB_SSL_REJECT_UNAUTHORIZED: envBoolean.default(false),
   DB_POOL_MAX: z.coerce.number().default(20),
   DB_POOL_MIN: z.coerce.number().default(5),
+  DB_SLOW_QUERY_MS: z.coerce.number().default(200),
   
   // Application
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
@@ -114,8 +115,15 @@ const envSchema = z.object({
   
   // Trusted Origins (for CORS and Better Auth)
   TRUSTED_ORIGINS: z.string().default('http://localhost:3000,http://localhost:5173'),
+  CORS_MAX_AGE_SEC: z.coerce.number().default(600),
 
   COOKIE_DOMAIN: z.string().default('localhost'),
+
+  // Auth middleware/session cache tuning
+  AUTH_REMOTE_SESSION_CACHE_TTL_MS: z.coerce.number().default(15_000),
+  AUTH_SESSION_USER_CACHE_TTL_MS: z.coerce.number().default(30_000),
+  AUTH_SESSION_AUTH_CONTEXT_CACHE_TTL_MS: z.coerce.number().default(30_000),
+  AUTH_MIDDLEWARE_SESSION_CONTEXT_CACHE_TTL_MS: z.coerce.number().default(45_000),
 
   // LLM Judge Configuration (via LiteLLM proxy)
   JUDGE_LLM_BASE_URL: z.string().default('https://litellm.whiteocean-2fb73b80.centralindia.azurecontainerapps.io/v1'),

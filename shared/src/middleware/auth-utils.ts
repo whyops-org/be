@@ -13,9 +13,9 @@ import { getCookie } from 'hono/cookie';
 import type { ApiKeyAuthContext, SessionAuthContext, SessionUser, UserSession } from './types';
 
 const logger = createServiceLogger('auth:utils');
-const REMOTE_SESSION_CACHE_TTL_MS = 15_000;
-const SESSION_USER_CACHE_TTL_MS = 30_000;
-const SESSION_AUTH_CONTEXT_CACHE_TTL_MS = 30_000;
+const REMOTE_SESSION_CACHE_TTL_MS = env.AUTH_REMOTE_SESSION_CACHE_TTL_MS;
+const SESSION_USER_CACHE_TTL_MS = env.AUTH_SESSION_USER_CACHE_TTL_MS;
+const SESSION_AUTH_CONTEXT_CACHE_TTL_MS = env.AUTH_SESSION_AUTH_CONTEXT_CACHE_TTL_MS;
 
 const remoteSessionCache = new Map<
   string,
@@ -544,6 +544,29 @@ export async function loadUserSession(c: Context): Promise<{ user: SessionUser; 
     setCachedSessionUser(fallbackUser.user);
     return fallbackUser;
   }
+}
+
+export async function loadUserSessionFast(
+  c: Context
+): Promise<{ user: SessionUser; session: UserSession['session'] } | null> {
+  const sessionData = await getSessionFromCookie(c);
+
+  if (!sessionData) {
+    return null;
+  }
+
+  const fastUser: SessionUser = {
+    id: sessionData.user.id,
+    email: sessionData.user.email,
+    name: sessionData.user.name,
+  };
+
+  setCachedSessionUser(fastUser);
+
+  return {
+    user: fastUser,
+    session: sessionData.session,
+  };
 }
 
 export async function loadUserSessionFromBetterAuth(

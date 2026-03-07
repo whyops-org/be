@@ -1,5 +1,6 @@
 import { zValidator } from '@hono/zod-validator';
 import { createServiceLogger } from '@whyops/shared/logger';
+import { prefixedRedisKey, redisDeleteByPattern } from '@whyops/shared/services';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { AgentSettingsService } from '../services/agent-settings.service';
@@ -21,6 +22,10 @@ const updateBodySchema = z
     message: 'At least one settings field is required',
   });
 
+async function invalidateEntitiesCachesForUser(userId: string): Promise<void> {
+  await redisDeleteByPattern(prefixedRedisKey('analyse', 'entities', userId, '*'), 10_000);
+}
+
 // DELETE /api/agent-settings/:id (reset to defaults)
 app.delete('/:id', zValidator('param', paramsSchema), async (c) => {
   const auth = c.get('whyopsAuth');
@@ -41,6 +46,8 @@ app.delete('/:id', zValidator('param', paramsSchema), async (c) => {
     if (!settings) {
       return c.json({ success: false, error: 'Agent not found' }, 404);
     }
+
+    await invalidateEntitiesCachesForUser(auth.userId);
 
     return c.json({ success: true, settings }, 200);
   } catch (error: any) {
@@ -118,6 +125,8 @@ app.patch(
       if (!settings) {
         return c.json({ success: false, error: 'Agent not found' }, 404);
       }
+
+      await invalidateEntitiesCachesForUser(auth.userId);
 
       return c.json({ success: true, settings }, 200);
     } catch (error: any) {
