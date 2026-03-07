@@ -121,11 +121,11 @@ const envSchema = z.object({
 
   // Auth middleware/session cache tuning
   AUTH_REMOTE_SESSION_CACHE_TTL_MS: z.coerce.number().default(15_000),
-  AUTH_SESSION_USER_CACHE_TTL_MS: z.coerce.number().default(120_000),
-  AUTH_SESSION_AUTH_CONTEXT_CACHE_TTL_MS: z.coerce.number().default(120_000),
-  AUTH_MIDDLEWARE_SESSION_CONTEXT_CACHE_TTL_MS: z.coerce.number().default(120_000),
-  AUTH_LOCAL_SESSION_CACHE_TTL_MS: z.coerce.number().default(60_000),
-  AUTH_GET_SESSION_CACHE_TTL_MS: z.coerce.number().default(30_000),
+  AUTH_SESSION_USER_CACHE_TTL_MS: z.coerce.number().default(30_000),
+  AUTH_SESSION_AUTH_CONTEXT_CACHE_TTL_MS: z.coerce.number().default(30_000),
+  AUTH_MIDDLEWARE_SESSION_CONTEXT_CACHE_TTL_MS: z.coerce.number().default(45_000),
+  AUTH_LOCAL_SESSION_CACHE_TTL_MS: z.coerce.number().default(10_000),
+  AUTH_GET_SESSION_CACHE_TTL_MS: z.coerce.number().default(10_000),
 
   // LLM Judge Configuration (via LiteLLM proxy)
   JUDGE_LLM_BASE_URL: z.string().default('https://litellm.whiteocean-2fb73b80.centralindia.azurecontainerapps.io/v1'),

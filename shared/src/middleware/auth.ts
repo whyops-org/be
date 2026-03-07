@@ -260,7 +260,9 @@ export function createLocalSessionMiddleware(auth: BetterAuthInstance) {
         return;
       }
 
-      const sessionData = await loadUserSessionFromBetterAuth(session);
+      const sessionData = await loadUserSessionFromBetterAuth(session, {
+        hydrateUserFromDb: false,
+      });
 
       if (sessionData) {
         c.set('sessionUser', sessionData.user);

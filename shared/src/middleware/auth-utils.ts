@@ -570,10 +570,26 @@ export async function loadUserSessionFast(
 }
 
 export async function loadUserSessionFromBetterAuth(
-  session: BetterAuthSession | null
+  session: BetterAuthSession | null,
+  options?: { hydrateUserFromDb?: boolean }
 ): Promise<{ user: SessionUser; session: UserSession['session'] } | null> {
   if (!session) {
     return null;
+  }
+
+  const hydrateUserFromDb = options?.hydrateUserFromDb !== false;
+
+  if (!hydrateUserFromDb) {
+    const fastUser: SessionUser = {
+      id: session.user.id,
+      email: session.user.email,
+      name: session.user.name,
+    };
+    setCachedSessionUser(fastUser);
+    return {
+      user: fastUser,
+      session: session.session,
+    };
   }
 
   const cachedUser = getCachedSessionUser(session.user.id);

@@ -8,8 +8,6 @@ import { ResponseUtil } from '../utils';
 const logger = createServiceLogger('auth:user-controller');
 const ONBOARDING_CACHE_TTL_MS = 15_000;
 const onboardingProgressCache = new Map<string, { expiresAtMs: number; value: OnboardingProgress }>();
-const currentUserCache = new Map<string, { expiresAtMs: number; value: Record<string, unknown> }>();
-const CURRENT_USER_CACHE_TTL_MS = 15_000;
 
 export interface OnboardingProgress {
   hasProvider: boolean;
@@ -83,27 +81,14 @@ export class UserController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
 
-      const cacheKey = `${user.id}:${Boolean(user.metadata?.onboardingComplete) ? '1' : '0'}:${user.name ?? ''}:${user.email}`;
-      const cached = currentUserCache.get(cacheKey);
-      if (cached && Date.now() <= cached.expiresAtMs) {
-        return ResponseUtil.success(c, cached.value);
-      }
-
-      const payload = {
+      return ResponseUtil.success(c, {
         id: user.id,
         email: user.email,
         name: user.name,
         metadata: user.metadata,
         onboardingComplete: Boolean(user.metadata?.onboardingComplete),
         isActive: user.isActive,
-      };
-
-      currentUserCache.set(cacheKey, {
-        expiresAtMs: Date.now() + CURRENT_USER_CACHE_TTL_MS,
-        value: payload,
       });
-
-      return ResponseUtil.success(c, payload);
     } catch (error: any) {
       logger.error({ error }, 'Failed to fetch user');
       return ResponseUtil.internalError(c, 'Failed to fetch user');
@@ -143,12 +128,6 @@ export class UserController {
         });
         onboardingProgressCache.delete(`${user.id}:0`);
         onboardingProgressCache.delete(`${user.id}:1`);
-      }
-
-      for (const key of currentUserCache.keys()) {
-        if (key.startsWith(`${user.id}:`)) {
-          currentUserCache.delete(key);
-        }
       }
 
       return ResponseUtil.success(c, {
