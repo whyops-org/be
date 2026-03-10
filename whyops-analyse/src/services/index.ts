@@ -6,3 +6,4 @@ export * from './event.service';
 export * from './sampling.service';
 export * from './thread.service';
 export * from './trace.service';
+export * from './user-runtime-permissions.service';

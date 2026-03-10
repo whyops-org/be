@@ -49,6 +49,9 @@ export interface User {
   name?: string;
   organizationId?: string;
   isActive: boolean;
+  canChangeAgentMaxTraces?: boolean;
+  canChangeAgentMaxSpans?: boolean;
+  canChangeMaxAgents?: boolean;
   metadata?: Record<string, any>;
   onboardingComplete?: boolean;
   createdAt: Date;

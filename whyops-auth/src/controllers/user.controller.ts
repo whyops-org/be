@@ -88,6 +88,11 @@ export class UserController {
         metadata: user.metadata,
         onboardingComplete: Boolean(user.metadata?.onboardingComplete),
         isActive: user.isActive,
+        permissions: {
+          canChangeAgentMaxTraces: Boolean(user.metadata?.canChangeAgentMaxTraces),
+          canChangeAgentMaxSpans: Boolean(user.metadata?.canChangeAgentMaxSpans),
+          canChangeMaxAgents: Boolean(user.metadata?.canChangeMaxAgents),
+        },
       });
     } catch (error: any) {
       logger.error({ error }, 'Failed to fetch user');

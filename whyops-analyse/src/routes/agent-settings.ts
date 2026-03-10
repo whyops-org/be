@@ -4,6 +4,7 @@ import { prefixedRedisKey, redisDeleteByPattern } from '@whyops/shared/services'
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { AgentSettingsService } from '../services/agent-settings.service';
+import { UserRuntimePermissionsService } from '../services/user-runtime-permissions.service';
 
 const logger = createServiceLogger('analyse:agent-settings-routes');
 const app = new Hono();
@@ -36,11 +37,14 @@ app.delete('/:id', zValidator('param', paramsSchema), async (c) => {
 
   try {
     const { id } = c.req.valid('param');
+    const permissions = await UserRuntimePermissionsService.getForUser(auth.userId);
     const settings = await AgentSettingsService.resetAgentSettings({
       userId: auth.userId,
       projectId: auth.projectId,
       environmentId: auth.environmentId,
       agentId: id,
+      canChangeAgentMaxTraces: permissions.canChangeAgentMaxTraces,
+      canChangeAgentMaxSpans: permissions.canChangeAgentMaxSpans,
     });
 
     if (!settings) {
@@ -65,7 +69,8 @@ app.get('/limits', async (c) => {
   }
 
   const limits = AgentSettingsService.getGlobalRuntimeLimits();
-  return c.json({ success: true, limits }, 200);
+  const permissions = await UserRuntimePermissionsService.getForUser(auth.userId);
+  return c.json({ success: true, limits, permissions }, 200);
 });
 
 // GET /api/agent-settings/:id
@@ -111,6 +116,10 @@ app.patch(
     try {
       const { id } = c.req.valid('param');
       const body = c.req.valid('json');
+      const permissions = await UserRuntimePermissionsService.getForUser(auth.userId);
+
+      const canChangeTraces = permissions.canChangeAgentMaxTraces;
+      const canChangeSpans = permissions.canChangeAgentMaxSpans;
 
       const settings = await AgentSettingsService.updateAgentSettings({
         userId: auth.userId,
@@ -118,8 +127,8 @@ app.patch(
         environmentId: auth.environmentId,
         agentId: id,
         samplingRate: body.samplingRate,
-        maxTraces: body.maxTraces,
-        maxSpans: body.maxSpans,
+        maxTraces: canChangeTraces ? body.maxTraces : undefined,
+        maxSpans: canChangeSpans ? body.maxSpans : undefined,
       });
 
       if (!settings) {

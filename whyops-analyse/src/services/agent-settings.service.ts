@@ -181,12 +181,14 @@ export class AgentSettingsService {
     projectId: string;
     environmentId: string;
     agentId: string;
+    canChangeAgentMaxTraces?: boolean;
+    canChangeAgentMaxSpans?: boolean;
   }): Promise<AgentSettingsRecord | null> {
     return this.updateAgentSettings({
       ...input,
       samplingRate: Number(env.DEFAULT_TRACE_SAMPLING_RATE),
-      maxTraces: Number(env.MAX_TRACES_PER_AGENT),
-      maxSpans: Number(env.MAX_SPANS_PER_AGENT),
+      maxTraces: input.canChangeAgentMaxTraces ? Number(env.MAX_TRACES_PER_AGENT) : undefined,
+      maxSpans: input.canChangeAgentMaxSpans ? Number(env.MAX_SPANS_PER_AGENT) : undefined,
     });
   }
 }
