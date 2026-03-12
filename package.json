@@ -2,6 +2,11 @@
   "name": "whyops-monorepo",
   "version": "1.0.0",
   "private": true,
+  "packageManager": "npm@10.9.2",
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
   "workspaces": [
     "whyops-proxy",
     "whyops-analyse",
@@ -9,27 +14,38 @@
     "shared"
   ],
   "scripts": {
-    "env-add": "bun scripts/env-add.js",
-    "env-gh-secret-sync": "bun scripts/env-gh-secret-sync.js",
+    "env-add": "node scripts/env-add.js",
+    "env-gh-secret-sync": "node scripts/env-gh-secret-sync.js",
     "deploy:all": "node scripts/deploy-gh.js all",
     "deploy:proxy": "node scripts/deploy-gh.js proxy",
     "deploy:analyse": "node scripts/deploy-gh.js analyse",
     "deploy:auth": "node scripts/deploy-gh.js auth",
-    "dev": "concurrently \"bun run dev:proxy\" \"bun run dev:analyse\" \"bun run dev:auth\"",
-    "dev:proxy": "cd whyops-proxy && bun run dev",
-    "dev:analyse": "cd whyops-analyse && bun run dev",
-    "dev:auth": "cd whyops-auth && bun run dev",
-    "build": "bun run build:shared && bun run build:proxy && bun run build:analyse && bun run build:auth",
-    "build:shared": "cd shared && bun run build",
-    "build:proxy": "cd whyops-proxy && bun run build",
-    "build:analyse": "cd whyops-analyse && bun run build",
-    "build:auth": "cd whyops-auth && bun run build",
-    "db:migrate": "cd shared && bun run db:migrate",
-    "db:seed": "cd shared && bun run db:seed"
+    "dev": "concurrently \"npm run dev:proxy\" \"npm run dev:analyse\" \"npm run dev:auth\"",
+    "dev:proxy": "npm run dev --workspace @whyops/proxy",
+    "dev:analyse": "npm run dev --workspace @whyops/analyse",
+    "dev:auth": "npm run dev --workspace @whyops/auth",
+    "build": "npm run build:shared && npm run build:proxy && npm run build:analyse && npm run build:auth",
+    "build:shared": "npm run build --workspace @whyops/shared",
+    "build:proxy": "npm run build --workspace @whyops/proxy",
+    "build:analyse": "npm run build --workspace @whyops/analyse",
+    "build:auth": "npm run build --workspace @whyops/auth",
+    "db:migrate": "npm run db:migrate --workspace @whyops/shared",
+    "db:seed": "npm run db:seed --workspace @whyops/shared",
+    "test:auto-threading": "node --import tsx tests/test-auto-threading.ts",
+    "test:complex-agent": "node --import tsx tests/test-complex-agent.ts",
+    "test:responses:auto-threading": "node --import tsx tests/test-responses-auto-threading.ts",
+    "test:responses:complex-agent": "node --import tsx tests/test-responses-complex-agent.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.21.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.18.0",
     "concurrently": "^9.1.0",
     "typescript": "^5.7.2"
+  },
+  "installConfig": {
+    "install-strategy": "nested"
   }
 }

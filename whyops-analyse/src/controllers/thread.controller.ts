@@ -65,6 +65,9 @@ export class ThreadController {
       }
 
       const threadId = c.req.param('threadId');
+      if (!threadId) {
+        return c.json({ success: false, error: 'Missing route parameter: threadId' }, 400);
+      }
       const include = parseInclude(c.req.query('include'));
       const eventInclude = parseInclude(c.req.query('eventInclude'));
       const eventLimit = Math.min(Math.max(parseInt(c.req.query('eventLimit') || '200', 10) || 200, 1), 1000);
@@ -111,6 +114,9 @@ export class ThreadController {
   static async getThreadGraph(c: Context) {
     try {
       const threadId = c.req.param('threadId');
+      if (!threadId) {
+        return c.json({ error: 'Missing route parameter: threadId' }, 400);
+      }
       const startDateParam = c.req.query('startDate');
       const endDateParam = c.req.query('endDate');
 

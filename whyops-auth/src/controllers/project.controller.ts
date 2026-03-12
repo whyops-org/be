@@ -27,6 +27,9 @@ export class ProjectController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const projectId = c.req.param('id');
+      if (!projectId) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: id');
+      }
       
       const project = await ProjectService.getProjectById(projectId, user.id);
 
@@ -62,7 +65,7 @@ export class ProjectController {
           isActive: result.project.isActive,
           createdAt: result.project.createdAt,
         },
-        environments: result.environments.map((env) => ({
+        environments: result.environments.map((env: any) => ({
           id: env.id,
           name: env.name,
           description: env.description,
@@ -90,6 +93,9 @@ export class ProjectController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const projectId = c.req.param('id');
+      if (!projectId) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: id');
+      }
       const data = await c.req.json() as UpdateProjectData;
       
       const project = await ProjectService.updateProject(projectId, user.id, data);
@@ -113,6 +119,9 @@ export class ProjectController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const projectId = c.req.param('id');
+      if (!projectId) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: id');
+      }
       
       await ProjectService.deactivateProject(projectId, user.id);
 
@@ -135,6 +144,9 @@ export class ProjectController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const projectId = c.req.param('projectId');
+      if (!projectId) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: projectId');
+      }
       
       const environments = await ProjectService.getEnvironments(projectId, user.id);
 

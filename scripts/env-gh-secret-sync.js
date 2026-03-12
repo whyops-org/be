@@ -73,8 +73,8 @@ function parseArgs(argv) {
 function printHelp() {
   console.log(`
 Usage:
-  bun run env-gh-secret-sync -- -k KEY -v VALUE
-  bun run env-gh-secret-sync -- -f /path/to/source.env
+  npm run env-gh-secret-sync -- -k KEY -v VALUE
+  npm run env-gh-secret-sync -- -f /path/to/source.env
 
 Options:
   -k, --key            Single secret key (uppercase style)
@@ -87,9 +87,9 @@ Options:
   -h, --help           Show this help
 
 Examples:
-  bun run env-gh-secret-sync -- -k REDIS_URL -v rediss://...
-  bun run env-gh-secret-sync -- -f .env.production
-  bun run env-gh-secret-sync -- -f .env.production -r whyops-org/be -e production
+  npm run env-gh-secret-sync -- -k REDIS_URL -v rediss://...
+  npm run env-gh-secret-sync -- -f .env.production
+  npm run env-gh-secret-sync -- -f .env.production -r whyops-org/be -e production
 `.trim());
 }
 
@@ -194,7 +194,7 @@ function main() {
 
   if ((singleMode && fileMode) || (!singleMode && !fileMode)) {
     console.error('Use either -k/-v for single secret OR -f for file sync.');
-    console.error('Run: bun run env-gh-secret-sync -- --help');
+    console.error('Run: npm run env-gh-secret-sync -- --help');
     process.exit(1);
   }
 

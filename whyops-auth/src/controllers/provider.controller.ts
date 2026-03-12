@@ -68,6 +68,9 @@ export class ProviderController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const id = c.req.param('id');
+      if (!id) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: id');
+      }
 
       const provider = await ProviderService.getProviderById(id, user.id);
 
@@ -89,6 +92,9 @@ export class ProviderController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const id = c.req.param('id');
+      if (!id) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: id');
+      }
       const data = await c.req.json() as UpdateProviderData;
 
       const provider = await ProviderService.updateProvider(id, user.id, data);
@@ -120,6 +126,9 @@ export class ProviderController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const id = c.req.param('id');
+      if (!id) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: id');
+      }
 
       await ProviderService.deleteProvider(id, user.id);
       await invalidateProviderCacheForUser(user.id);
@@ -143,6 +152,9 @@ export class ProviderController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const id = c.req.param('id');
+      if (!id) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: id');
+      }
 
       const isActive = await ProviderService.toggleProvider(id, user.id);
       await invalidateProviderCacheForUser(user.id);

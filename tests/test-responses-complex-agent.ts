@@ -5,7 +5,7 @@ const BASE_URL = process.argv[3] || 'https://api.openai.com/v1';
 const MODEL = process.argv[4] || 'gpt-4o';
 
 if (!API_KEY) {
-  console.error('Usage: bun run tests/test-responses-complex-agent.ts <API_KEY> [BASE_URL] [MODEL]');
+  console.error('Usage: npm run test:responses:complex-agent -- <API_KEY> [BASE_URL] [MODEL]');
   process.exit(1);
 }
 

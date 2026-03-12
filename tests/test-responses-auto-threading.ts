@@ -4,7 +4,7 @@ const BASE_URL = process.argv[3] || 'https://api.openai.com/v1';
 const MODEL = process.argv[4] || 'gpt-4o'; // Default to gpt-4o as it supports responses api likely
 
 if (!API_KEY) {
-  console.error('Usage: bun run tests/test-responses-auto-threading.ts <API_KEY> [BASE_URL] [MODEL]');
+  console.error('Usage: npm run test:responses:auto-threading -- <API_KEY> [BASE_URL] [MODEL]');
   process.exit(1);
 }
 

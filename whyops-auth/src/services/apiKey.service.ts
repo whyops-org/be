@@ -36,6 +36,22 @@ export interface ApiKeyWithRelations extends ApiKey {
   apiKey?: string; // Only returned on creation
 }
 
+export interface CreatedApiKeyResult {
+  id: string;
+  name: string;
+  apiKey: string;
+  keyPrefix: string;
+  projectId: string;
+  environmentId: string;
+  providerId?: string;
+  entityId?: string;
+  isMaster: boolean;
+  rateLimit?: number;
+  expiresAt?: Date;
+  isActive: boolean;
+  createdAt: Date;
+}
+
 export interface MaskedApiKeyByStage {
   id: string;
   name: string;
@@ -296,7 +312,7 @@ export class ApiKeyService {
   /**
    * Create a new API key
    */
-  static async createApiKey(data: CreateApiKeyData) {
+  static async createApiKey(data: CreateApiKeyData): Promise<CreatedApiKeyResult> {
     // Verify project and environment belong to user
     const project = await Project.findOne({
       where: { id: data.projectId, userId: data.userId },
@@ -395,7 +411,18 @@ export class ApiKeyService {
 
     // Return with the actual key (only on creation)
     return {
-      ...apiKeyRecord.toJSON(),
+      id: apiKeyRecord.id,
+      name: apiKeyRecord.name,
+      projectId: apiKeyRecord.projectId,
+      environmentId: apiKeyRecord.environmentId,
+      providerId: apiKeyRecord.providerId,
+      entityId: apiKeyRecord.entityId,
+      keyPrefix: apiKeyRecord.keyPrefix,
+      isMaster: apiKeyRecord.isMaster,
+      rateLimit: apiKeyRecord.rateLimit,
+      expiresAt: apiKeyRecord.expiresAt,
+      isActive: apiKeyRecord.isActive,
+      createdAt: apiKeyRecord.createdAt,
       apiKey,
     };
   }

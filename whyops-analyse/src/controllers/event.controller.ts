@@ -139,6 +139,9 @@ export class EventController {
   static async getEvent(c: Context) {
     try {
       const id = c.req.param('id');
+      if (!id) {
+        return c.json({ error: 'Missing route parameter: id' }, 400);
+      }
       const include = parseInclude(c.req.query('include'));
       const event = await EventService.getEventById(id, {
         includeContent: include.has('content'),

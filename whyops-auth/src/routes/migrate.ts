@@ -1,10 +1,14 @@
 import env from '@whyops/shared/env';
 import { createServiceLogger } from '@whyops/shared/logger';
 import { buildPgSslConfig, parseDatabaseUrl } from '@whyops/shared/utils';
-import { getMigrations } from 'better-auth/db';
+import { getMigrations } from 'better-auth/db/migration';
 import { Hono } from 'hono';
 import { Kysely, PostgresDialect } from 'kysely';
 import { Pool } from 'pg';
+
+interface MigrationTable {
+  table: string;
+}
 
 const logger = createServiceLogger('auth:migrate');
 const app = new Hono();
@@ -62,8 +66,8 @@ app.post('/', async (c) => {
     }
 
     logger.info({ 
-      toBeCreated: toBeCreated.map(t => t.table),
-      toBeAdded: toBeAdded.map(t => t.table),
+      toBeCreated: toBeCreated.map((t: MigrationTable) => t.table),
+      toBeAdded: toBeAdded.map((t: MigrationTable) => t.table),
     }, 'Running migrations');
 
     await runMigrations();
@@ -73,14 +77,14 @@ app.post('/', async (c) => {
     return c.json({
       success: true,
       message: 'Migrations completed successfully',
-      tablesCreated: toBeCreated.map(t => t.table),
-      tablesUpdated: toBeAdded.map(t => t.table),
+      tablesCreated: toBeCreated.map((t: MigrationTable) => t.table),
+      tablesUpdated: toBeAdded.map((t: MigrationTable) => t.table),
     });
   } catch (error: any) {
     logger.error({ error }, 'Migration failed');
     return c.json({
       success: false,
-      error: error instanceof Error ? error.message : 'Migration failed',
+      error: typeof error?.message === 'string' ? error.message : 'Migration failed',
     }, 500);
   }
 });

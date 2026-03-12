@@ -137,8 +137,8 @@ function parseEnvLines(content) {
 function printHelp() {
   console.log(`
 Usage:
-  bun run env-add -- -k KEY -v VALUE
-  bun run env-add -- -f /path/to/source.env
+  npm run env-add -- -k KEY -v VALUE
+  npm run env-add -- -f /path/to/source.env
 
 Options:
   -k, --key      Single env key (uppercase style)
@@ -170,7 +170,7 @@ function main() {
 
   if ((hasSingle && hasFile) || (!hasSingle && !hasFile)) {
     console.error('Use either -k/-v for single key, or -f for bulk file sync.');
-    console.error('Run: bun run env-add -- --help');
+    console.error('Run: npm run env-add -- --help');
     process.exit(1);
   }
 
@@ -200,7 +200,7 @@ function main() {
     }
   } else {
     if (!key || value === '') {
-      console.error('Usage: bun run env-add -- -k KEY -v VALUE');
+      console.error('Usage: npm run env-add -- -k KEY -v VALUE');
       process.exit(1);
     }
 

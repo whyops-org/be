@@ -3,19 +3,24 @@
 echo "🚀 WhyOps Setup Script"
 echo "====================="
 
-# Check if bun is installed
-if ! command -v bun &> /dev/null; then
-    echo "❌ Bun not found. Installing..."
-    curl -fsSL https://bun.sh/install | bash
-    export PATH="$HOME/.bun/bin:$PATH"
+# Check if Node.js and npm are installed
+if ! command -v node &> /dev/null; then
+    echo "❌ Node.js not found. Install Node.js 22+ from https://nodejs.org/ or via nvm."
+    exit 1
 fi
 
-echo "✅ Bun installed: $(bun --version)"
+if ! command -v npm &> /dev/null; then
+    echo "❌ npm not found. Install Node.js 22+ from https://nodejs.org/ or via nvm."
+    exit 1
+fi
+
+echo "✅ Node.js installed: $(node --version)"
+echo "✅ npm installed: $(npm --version)"
 
 # Install dependencies
 echo ""
 echo "📦 Installing dependencies..."
-bun install
+npm install
 
 # Copy environment file
 if [ ! -f .env ]; then
@@ -58,7 +63,7 @@ echo ""
 echo "Next steps:"
 echo "1. Edit .env file with your configuration"
 echo "2. Start PostgreSQL (if not running)"
-echo "3. Run: bun run dev"
+echo "3. Run: npm run dev"
 echo ""
 echo "Services will run on:"
 echo "  - Proxy:   http://localhost:8080"

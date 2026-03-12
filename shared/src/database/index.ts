@@ -70,7 +70,7 @@ export async function initDatabase() {
     
     // Note: Using migrations for schema changes, not sync({ alter: true })
     // Sync with alter causes issues with constraint naming in PostgreSQL
-    // Run `bun run db:migrate` to apply schema changes
+    // Run `npm run db:migrate` to apply schema changes
     if (env.NODE_ENV === 'development') {
       try {
         // Only sync in development to create tables if they don't exist

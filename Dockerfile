@@ -3,7 +3,7 @@
 # Valid SERVICE values: proxy, analyse, auth
 
 ARG SERVICE
-FROM oven/bun:1.3-alpine AS base
+FROM node:22-alpine AS base
 WORKDIR /app
 
 # Install and build in single stage to preserve workspace symlinks
@@ -14,19 +14,19 @@ RUN case "$SERVICE" in \
       *) echo "Invalid SERVICE: $SERVICE (expected proxy|analyse|auth)" >&2; exit 1 ;; \
     esac
 
-COPY package.json bun.lock ./
+COPY package.json package-lock.json ./
 COPY shared/package.json ./shared/
 COPY whyops-proxy/package.json ./whyops-proxy/
 COPY whyops-analyse/package.json ./whyops-analyse/
 COPY whyops-auth/package.json ./whyops-auth/
-RUN bun install --frozen-lockfile
+RUN npm ci --install-strategy=nested
 
 COPY shared ./shared
 COPY whyops-${SERVICE} ./whyops-${SERVICE}
 COPY tsconfig.json ./
 
-RUN bun run build:shared && \
-    bun run build:${SERVICE}
+RUN npm run build:shared && \
+    npm run build:${SERVICE}
 
 # Production stage - select service based on build arg
 FROM base AS production
@@ -72,4 +72,4 @@ EXPOSE 8080 8081 8082
 
 # CMD selects the service based on SERVICE arg
 WORKDIR /app/whyops-${SERVICE}
-CMD ["bun", "run", "start"]
+CMD ["npm", "run", "start"]

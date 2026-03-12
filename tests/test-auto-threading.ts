@@ -4,7 +4,7 @@ const BASE_URL = process.argv[3] || 'https://api.openai.com/v1';
 const MODEL = process.argv[4] || 'gpt-3.5-turbo';
 
 if (!API_KEY) {
-  console.error('Usage: bun run tests/test-auto-threading.ts <API_KEY> [BASE_URL] [MODEL]');
+  console.error('Usage: npm run test:auto-threading -- <API_KEY> [BASE_URL] [MODEL]');
   process.exit(1);
 }
 

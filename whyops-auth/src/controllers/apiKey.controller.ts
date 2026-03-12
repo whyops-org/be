@@ -31,6 +31,9 @@ export class ApiKeyController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const id = c.req.param('id');
+      if (!id) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: id');
+      }
 
       const apiKey = await ApiKeyService.getUnmaskedApiKeyById(id, user.id);
 
@@ -130,6 +133,9 @@ export class ApiKeyController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const id = c.req.param('id');
+      if (!id) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: id');
+      }
       
       const apiKey = await ApiKeyService.getApiKeyById(id, user.id);
 
@@ -151,6 +157,9 @@ export class ApiKeyController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const id = c.req.param('id');
+      if (!id) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: id');
+      }
       const data = await c.req.json() as UpdateApiKeyData;
       
       if (data.expiresAt) {
@@ -185,6 +194,9 @@ export class ApiKeyController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const id = c.req.param('id');
+      if (!id) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: id');
+      }
       
       await ApiKeyService.deleteApiKey(id, user.id);
       await invalidateApiKeyAuthCacheById(id);
@@ -208,6 +220,9 @@ export class ApiKeyController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const id = c.req.param('id');
+      if (!id) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: id');
+      }
       
       const isActive = await ApiKeyService.toggleApiKey(id, user.id);
       await invalidateApiKeyAuthCacheById(id);
@@ -231,6 +246,9 @@ export class ApiKeyController {
         return ResponseUtil.unauthorized(c, 'Not authenticated');
       }
       const id = c.req.param('id');
+      if (!id) {
+        return ResponseUtil.badRequest(c, 'Missing route parameter: id');
+      }
 
       const regenerated = await ApiKeyService.regenerateApiKey(id, user.id);
       await invalidateApiKeyAuthCacheById(id);
